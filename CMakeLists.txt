@@ -13,12 +13,26 @@ endif()
 find_package(MPI REQUIRED COMPONENTS CXX)
 find_package(OpenMP REQUIRED COMPONENTS CXX)
 
+set(PHASEGAP_GIT_SHA "unknown")
+execute_process(
+  COMMAND git rev-parse --short=12 HEAD
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  OUTPUT_VARIABLE PHASEGAP_GIT_SHA_OUT
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET
+)
+if(PHASEGAP_GIT_SHA_OUT)
+  set(PHASEGAP_GIT_SHA "${PHASEGAP_GIT_SHA_OUT}")
+endif()
+
 add_executable(phasegap
   src/cli/cli.cpp
   src/kernels/kernels.cpp
   src/main.cpp
   src/mpi/ring_halo.cpp
   src/stats/checksum.cpp
+  src/stats/csv.cpp
+  src/stats/manifest.cpp
   src/stats/metrics.cpp
   src/stats/timer.cpp
 )
@@ -37,4 +51,9 @@ target_link_libraries(phasegap
 target_compile_options(phasegap
   PRIVATE
     $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wall -Wextra -Wpedantic>
+)
+
+target_compile_definitions(phasegap
+  PRIVATE
+    PHASEGAP_GIT_SHA="${PHASEGAP_GIT_SHA}"
 )

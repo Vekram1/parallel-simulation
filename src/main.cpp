@@ -12,6 +12,8 @@
 #include "phasegap/cli.hpp"
 #include "phasegap/mpi/ring_halo.hpp"
 #include "phasegap/stats/checksum.hpp"
+#include "phasegap/stats/csv.hpp"
+#include "phasegap/stats/manifest.hpp"
 #include "phasegap/stats/metrics.hpp"
 #include "phasegap/stats/timer.hpp"
 
@@ -470,6 +472,58 @@ int main(int argc, char** argv) {
     const double wait_skew = phasegap::stats::WaitSkew(t_wait_max, t_wait_mean_avg);
     const phasegap::stats::BandwidthMetrics bw = phasegap::stats::ComputeBandwidthMetrics(
         cfg.halo, sizeof(double), t_comm_mean_avg);
+    phasegap::stats::CsvSummary csv_summary{};
+    csv_summary.ranks = world_size;
+    csv_summary.omp_threads = omp_threads;
+    csv_summary.mpi_thread_provided = provided;
+    csv_summary.measured_iters = measured_iters;
+    csv_summary.checksum64 = checksum64_global;
+    csv_summary.msg_bytes = bw.msg_bytes;
+    csv_summary.bytes_total = bw.bytes_total;
+    csv_summary.t_iter_us = t_iter_mean_avg;
+    csv_summary.t_post_us = t_post_mean_avg;
+    csv_summary.t_interior_us = t_interior_mean_avg;
+    csv_summary.t_wait_us = t_wait_mean_avg;
+    csv_summary.t_boundary_us = t_boundary_mean_avg;
+    csv_summary.t_poll_us = t_poll_mean_avg;
+    csv_summary.t_comm_window_us = t_comm_mean_avg;
+    csv_summary.wait_frac = wait_frac;
+    csv_summary.wait_skew = wait_skew;
+    csv_summary.overlap_ratio = overlap_ratio_avg;
+    csv_summary.bw_effective_bytes_per_us = bw.bw_effective_bytes_per_us;
+    csv_summary.mpi_test_calls = mpi_test_calls_mean_avg;
+    csv_summary.mpi_wait_calls = mpi_wait_calls_mean_avg;
+    const bool csv_ok = phasegap::stats::WriteCsvRow(cfg, csv_summary, "csv");
+    if (!csv_ok) {
+      MPI_Finalize();
+      return EXIT_FAILURE;
+    }
+
+    if (cfg.manifest) {
+      phasegap::stats::RuntimeSummary summary{};
+      summary.ranks = world_size;
+      summary.omp_threads = omp_threads;
+      summary.measured_iters = measured_iters;
+      summary.checksum64 = checksum64_global;
+      summary.t_iter_us = t_iter_mean_avg;
+      summary.t_post_us = t_post_mean_avg;
+      summary.t_interior_us = t_interior_mean_avg;
+      summary.t_wait_us = t_wait_mean_avg;
+      summary.t_boundary_us = t_boundary_mean_avg;
+      summary.t_poll_us = t_poll_mean_avg;
+      summary.t_comm_window_us = t_comm_mean_avg;
+      summary.wait_frac = wait_frac;
+      summary.wait_skew = wait_skew;
+      summary.overlap_ratio = overlap_ratio_avg;
+      summary.mpi_test_calls = mpi_test_calls_mean_avg;
+      summary.mpi_wait_calls = mpi_wait_calls_mean_avg;
+      const bool manifest_ok =
+          phasegap::stats::WriteManifest(cfg, summary, provided, "manifest");
+      if (!manifest_ok) {
+        MPI_Finalize();
+        return EXIT_FAILURE;
+      }
+    }
 
     std::cout << "phasegap skeleton ready"
               << " | ranks=" << world_size

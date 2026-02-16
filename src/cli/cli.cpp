@@ -1,6 +1,9 @@
 #include "phasegap/cli.hpp"
 
+#include <chrono>
+#include <ctime>
 #include <cstdlib>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -56,6 +59,20 @@ bool EnsurePositive(int value, const char* name, ParseResult* result) {
     return false;
   }
   return true;
+}
+
+std::string DefaultRunId() {
+  const auto now = std::chrono::system_clock::now();
+  const std::time_t tt = std::chrono::system_clock::to_time_t(now);
+  std::tm tm{};
+#if defined(_WIN32)
+  gmtime_s(&tm, &tt);
+#else
+  gmtime_r(&tt, &tm);
+#endif
+  std::ostringstream oss;
+  oss << "run-" << std::put_time(&tm, "%Y%m%dT%H%M%SZ");
+  return oss.str();
 }
 
 }  // namespace
@@ -446,6 +463,9 @@ ParseResult ParseArgs(int argc, char** argv) {
 
   if (cfg.out_dir.empty()) {
     cfg.out_dir = "runs/default";
+  }
+  if (cfg.run_id.empty()) {
+    cfg.run_id = DefaultRunId();
   }
   if (cfg.csv.empty()) {
     cfg.csv = cfg.out_dir + "/results.csv";
