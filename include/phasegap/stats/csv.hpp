@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 #include "phasegap/cli.hpp"
 
@@ -12,6 +13,7 @@ struct CsvSummary {
   int omp_threads = 0;
   int mpi_thread_provided = 0;
   int measured_iters = 0;
+  std::string transport_effective;
 
   std::uint64_t checksum64 = 0;
   std::size_t msg_bytes = 0;

@@ -14,6 +14,7 @@ struct TraceSummary {
   int measured_iters = 0;
   int trace_iters = 0;
   int mpi_thread_provided = 0;
+  std::string transport_effective;
 
   double t_post_us = 0.0;
   double t_interior_us = 0.0;

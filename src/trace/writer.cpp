@@ -118,7 +118,7 @@ bool WriteTrace(const cli::Config& cfg, const TraceSummary& summary, const char*
   }
 
   out << "{\n";
-  out << "  \"trace_schema_version\": 1,\n";
+  out << "  \"trace_schema_version\": 2,\n";
   out << "  \"timestamp\": \"" << JsonEscape(CurrentTimestampUtc()) << "\",\n";
   out << "  \"run_id\": \"" << JsonEscape(cfg.run_id) << "\",\n";
   out << "  \"git_sha\": \"" << JsonEscape(GitSha()) << "\",\n";
@@ -132,6 +132,8 @@ bool WriteTrace(const cli::Config& cfg, const TraceSummary& summary, const char*
   out << "    \"omp_threads\": " << summary.omp_threads << ",\n";
   out << "    \"trace_iters\": " << summary.trace_iters << ",\n";
   out << "    \"measured_iters\": " << summary.measured_iters << ",\n";
+  out << "    \"transport_requested\": \"" << cli::ToString(cfg.transport) << "\",\n";
+  out << "    \"transport_effective\": \"" << JsonEscape(summary.transport_effective) << "\",\n";
   out << "    \"mpi_thread_requested\": \"" << cli::ToString(cfg.mpi_thread) << "\",\n";
   out << "    \"mpi_thread_provided\": " << summary.mpi_thread_provided << ",\n";
   out << "    \"trace_window_start_iter\": " << summary.trace_window_start_iter << ",\n";
@@ -147,7 +149,8 @@ bool WriteTrace(const cli::Config& cfg, const TraceSummary& summary, const char*
   out << "    \"OMP_PROC_BIND\": \"" << JsonEscape(GetEnv("OMP_PROC_BIND")) << "\",\n";
   out << "    \"OMP_PLACES\": \"" << JsonEscape(GetEnv("OMP_PLACES")) << "\",\n";
   out << "    \"OMP_SCHEDULE\": \"" << JsonEscape(GetEnv("OMP_SCHEDULE")) << "\",\n";
-  out << "    \"OMPI_MCA_btl\": \"" << JsonEscape(GetEnv("OMPI_MCA_btl")) << "\"\n";
+  out << "    \"OMPI_MCA_btl\": \"" << JsonEscape(GetEnv("OMPI_MCA_btl")) << "\",\n";
+  out << "    \"OMPI_MCA_pml\": \"" << JsonEscape(GetEnv("OMPI_MCA_pml")) << "\"\n";
   out << "  },\n";
   out << "  \"traceEvents\": [\n";
   bool first_event = true;

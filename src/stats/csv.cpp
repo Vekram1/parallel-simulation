@@ -85,7 +85,8 @@ bool WriteCsvRow(const cli::Config& cfg, const CsvSummary& summary, const char* 
   }
 
   if (write_header) {
-    out << "schema_version,timestamp,run_id,mode,kernel,mpi_thread_requested,mpi_thread_provided"
+    out << "schema_version,timestamp,run_id,mode,kernel,transport_requested,transport_effective"
+        << ",mpi_thread_requested,mpi_thread_provided"
         << ",ranks,omp_threads,measured_iters,N,H,radius,timesteps,B,iters,warmup,poll_every"
         << ",t_iter_us,t_post_us,t_interior_us,t_wait_us,t_boundary_us,t_poll_us,t_comm_window_us"
         << ",t_iter_mean_max_us,t_post_mean_max_us,t_interior_mean_max_us,t_wait_mean_max_us"
@@ -99,11 +100,13 @@ bool WriteCsvRow(const cli::Config& cfg, const CsvSummary& summary, const char* 
   }
 
   const std::vector<std::string> fields = {
-      "1",
+      "2",
       CurrentTimestampUtc(),
       cfg.run_id,
       cli::ToString(cfg.mode),
       cli::ToString(cfg.kernel),
+      cli::ToString(cfg.transport),
+      summary.transport_effective,
       cli::ToString(cfg.mpi_thread),
       std::to_string(summary.mpi_thread_provided),
       std::to_string(summary.ranks),

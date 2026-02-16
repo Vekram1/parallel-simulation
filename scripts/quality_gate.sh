@@ -32,6 +32,8 @@ N_LOCAL=64
 HALO=4
 ITERS=4
 WARMUP=1
+CMAKE_ARGS=()
+AUTO_CXX_COMPILER=""
 
 STRICT_ARTIFACTS=0
 SKIP_BUILD=0
@@ -292,6 +294,14 @@ validate_manifest_schema() {
     "${path}" "\"mpi_thread_provided\"" \
     "manifest missing required key: mpi_thread_provided (${path})" \
     "manifest missing key mpi_thread_provided (${path})"
+  require_file_contains \
+    "${path}" "\"transport_requested\"" \
+    "manifest missing required key: transport_requested (${path})" \
+    "manifest missing key transport_requested (${path})"
+  require_file_contains \
+    "${path}" "\"transport_effective\"" \
+    "manifest missing required key: transport_effective (${path})" \
+    "manifest missing key transport_effective (${path})"
 }
 
 validate_csv_schema() {
@@ -299,6 +309,8 @@ validate_csv_schema() {
   require_csv_column "${path}" "schema_version"
   require_csv_column "${path}" "mode"
   require_csv_column "${path}" "checksum64"
+  require_csv_column "${path}" "transport_requested"
+  require_csv_column "${path}" "transport_effective"
 
   if [[ "$(wc -l <"${path}")" -lt 2 ]]; then
     fail_or_warn \
@@ -347,6 +359,14 @@ validate_trace_schema() {
     "${path}" "\"traceEvents\"" \
     "trace missing traceEvents array (${path})" \
     "trace missing traceEvents array (${path})"
+  require_file_contains \
+    "${path}" "\"transport_requested\"" \
+    "trace missing transport_requested metadata (${path})" \
+    "trace missing transport_requested metadata (${path})"
+  require_file_contains \
+    "${path}" "\"transport_effective\"" \
+    "trace missing transport_effective metadata (${path})" \
+    "trace missing transport_effective metadata (${path})"
 
   local label
   for label in comm_post interior_compute waitall boundary_compute; do
@@ -377,6 +397,34 @@ if (( ITERS <= WARMUP )); then
   exit 1
 fi
 
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  if [[ -z "${SDKROOT:-}" ]] && command -v xcrun >/dev/null 2>&1; then
+    SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+    export SDKROOT
+  fi
+  if [[ -z "${CXX:-}" ]]; then
+    AUTO_CXX_COMPILER="/usr/bin/clang++"
+    export CXX="${AUTO_CXX_COMPILER}"
+  fi
+  if [[ -n "${SDKROOT:-}" ]]; then
+    CMAKE_ARGS+=("-DCMAKE_OSX_SYSROOT=${SDKROOT}")
+  fi
+  if [[ -n "${AUTO_CXX_COMPILER}" ]]; then
+    CMAKE_ARGS+=("-DCMAKE_CXX_COMPILER=${AUTO_CXX_COMPILER}")
+  fi
+  if command -v brew >/dev/null 2>&1; then
+    LIBOMP_PREFIX="$(brew --prefix libomp 2>/dev/null || true)"
+    if [[ -n "${LIBOMP_PREFIX}" && -f "${LIBOMP_PREFIX}/lib/libomp.dylib" ]]; then
+      CMAKE_ARGS+=(
+        "-DOpenMP_ROOT=${LIBOMP_PREFIX}"
+        "-DOpenMP_CXX_FLAGS=-Xpreprocessor -fopenmp -I${LIBOMP_PREFIX}/include"
+        "-DOpenMP_CXX_LIB_NAMES=omp"
+        "-DOpenMP_omp_LIBRARY=${LIBOMP_PREFIX}/lib/libomp.dylib"
+      )
+    fi
+  fi
+fi
+
 echo "[gate] configure/build args: build_dir=${BUILD_DIR} run_dir=${RUN_DIR} np=${NP} threads=${THREADS} n_local=${N_LOCAL} halo=${HALO} iters=${ITERS} warmup=${WARMUP} skip_build=${SKIP_BUILD}"
 
 if [[ ${SKIP_BUILD} -eq 0 ]]; then
@@ -386,7 +434,7 @@ if [[ ${SKIP_BUILD} -eq 0 ]]; then
   else
     CMAKE_CONFIGURE_CMD=(cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Release)
   fi
-  if ! "${CMAKE_CONFIGURE_CMD[@]}"; then
+  if ! "${CMAKE_CONFIGURE_CMD[@]}" "${CMAKE_ARGS[@]}"; then
     echo "[gate] fail: configure failed (likely missing MPI/OpenMP toolchain in this environment)" >&2
     echo "[gate] hint: if you see 'ld: library System not found' on macOS, run xcode-select --install and verify SDK tools in your shell." >&2
     echo "[gate] hint: if OpenMP is missing, use scripts/dev/configure-macos-openmp.sh for the build dir." >&2

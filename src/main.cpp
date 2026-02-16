@@ -74,6 +74,46 @@ bool EnvIsUnsetOrEmpty(const char* key) {
   return val == nullptr || val[0] == '\0';
 }
 
+struct TransportSelection {
+  std::string requested;
+  std::string effective;
+  bool attempted_override = false;
+  bool override_ok = true;
+};
+
+TransportSelection ConfigureTransportEnv(phasegap::cli::Transport transport) {
+  TransportSelection selection{};
+  selection.requested = phasegap::cli::ToString(transport);
+  selection.effective = "auto";
+
+  auto apply_ompi_btl = [&](const char* value) {
+    selection.attempted_override = true;
+#if defined(_WIN32)
+    selection.override_ok = (_putenv_s("OMPI_MCA_btl", value) == 0);
+#else
+    selection.override_ok = (setenv("OMPI_MCA_btl", value, 1) == 0);
+#endif
+  };
+
+  switch (transport) {
+    case phasegap::cli::Transport::kAuto:
+      break;
+    case phasegap::cli::Transport::kTcp:
+      apply_ompi_btl("self,tcp");
+      break;
+    case phasegap::cli::Transport::kShm:
+      // Best-effort shared-memory preference for Open MPI with TCP fallback.
+      apply_ompi_btl("self,vader,sm,tcp");
+      break;
+  }
+
+  const char* effective = std::getenv("OMPI_MCA_btl");
+  if (effective != nullptr && effective[0] != '\0') {
+    selection.effective = effective;
+  }
+  return selection;
+}
+
 void EmitRuntimeWarnings(const phasegap::cli::Config& cfg, int world_size, int rank) {
   if (rank != 0) {
     return;
@@ -153,6 +193,7 @@ int main(int argc, char** argv) {
     return parsed.exit_code;
   }
   const phasegap::cli::Config& cfg = parsed.config;
+  const TransportSelection transport_selection = ConfigureTransportEnv(cfg.transport);
 
   const int mpi_thread_requested = RequestedMpiThreadLevel(cfg.mpi_thread);
   int provided = MPI_THREAD_SINGLE;
@@ -173,6 +214,11 @@ int main(int argc, char** argv) {
     }
     MPI_Finalize();
     return EXIT_FAILURE;
+  }
+  if (rank == 0 && transport_selection.attempted_override && !transport_selection.override_ok) {
+    std::cerr << "Warning: failed to apply OMPI transport override for --transport="
+              << transport_selection.requested
+              << "; runtime transport remains '" << transport_selection.effective << "'\n";
   }
 
   if (cfg.threads > 1 && provided < MPI_THREAD_FUNNELED) {
@@ -324,32 +370,7 @@ int main(int argc, char** argv) {
     }
 
     if (cfg.mode == phasegap::cli::Mode::kPhaseBlk) {
-      timer.BeginCommWindow();
-      timer.BeginWait();
       bool mpi_ok = true;
-      mpi_ok = mpi_ok && CheckMpiSuccess(
-                           MPI_Sendrecv(send_left.data(), cfg.halo, MPI_DOUBLE, neighbors.left, 100,
-                                        recv_right.data(), cfg.halo, MPI_DOUBLE, neighbors.right, 100,
-                                        MPI_COMM_WORLD, MPI_STATUS_IGNORE),
-                           "MPI_Sendrecv(left->right)", rank);
-      mpi_ok = mpi_ok && CheckMpiSuccess(
-                           MPI_Sendrecv(send_right.data(), cfg.halo, MPI_DOUBLE, neighbors.right,
-                                        101, recv_left.data(), cfg.halo, MPI_DOUBLE, neighbors.left,
-                                        101, MPI_COMM_WORLD, MPI_STATUS_IGNORE),
-                           "MPI_Sendrecv(right->left)", rank);
-      timer.EndWait();
-      timer.EndCommWindow();
-      if (!mpi_ok) {
-        if (use_persistent_requests) {
-          FreePersistentRequests(persistent_reqs);
-        }
-        MPI_Finalize();
-        return EXIT_FAILURE;
-      }
-
-      phasegap::mpi::UnpackLeftGhost(&buffers, recv_left);
-      phasegap::mpi::UnpackRightGhost(&buffers, recv_right);
-
       const int interior_begin = buffers.OwnedBegin() + cfg.boundary_width;
       const int interior_end = buffers.OwnedEnd() - cfg.boundary_width;
       const int left_boundary_end = std::min(buffers.OwnedBegin() + cfg.boundary_width, buffers.OwnedEnd());
@@ -357,13 +378,43 @@ int main(int argc, char** argv) {
           std::max(left_boundary_end, buffers.OwnedEnd() - cfg.boundary_width);
       double interior_work_us = 0.0;
 
-#pragma omp parallel
+#pragma omp parallel shared(mpi_ok, interior_work_us)
       {
         const int tid = omp_get_thread_num();
+#pragma omp master
+        {
+          timer.BeginCommWindow();
+          timer.BeginWait();
+          mpi_ok = mpi_ok && CheckMpiSuccess(
+                               MPI_Sendrecv(send_left.data(), cfg.halo, MPI_DOUBLE, neighbors.left,
+                                            100, recv_right.data(), cfg.halo, MPI_DOUBLE,
+                                            neighbors.right, 100, MPI_COMM_WORLD,
+                                            MPI_STATUS_IGNORE),
+                               "MPI_Sendrecv(left->right)", rank);
+          mpi_ok = mpi_ok && CheckMpiSuccess(
+                               MPI_Sendrecv(send_right.data(), cfg.halo, MPI_DOUBLE, neighbors.right,
+                                            101, recv_left.data(), cfg.halo, MPI_DOUBLE,
+                                            neighbors.left, 101, MPI_COMM_WORLD,
+                                            MPI_STATUS_IGNORE),
+                               "MPI_Sendrecv(right->left)", rank);
+          timer.EndWait();
+          timer.EndCommWindow();
+
+          if (mpi_ok) {
+            phasegap::mpi::UnpackLeftGhost(&buffers, recv_left);
+            phasegap::mpi::UnpackRightGhost(&buffers, recv_right);
+          }
+        }
+
+#pragma omp barrier
+
         const phasegap::stats::TimePoint interior_start = phasegap::stats::SteadyClock::now();
 #pragma omp for nowait schedule(runtime)
         for (int i = interior_begin; i < interior_end; ++i) {
-          buffers.next[static_cast<std::size_t>(i)] = UpdatePoint(buffers, i, cfg.kernel, cfg.radius);
+          if (mpi_ok) {
+            buffers.next[static_cast<std::size_t>(i)] =
+                UpdatePoint(buffers, i, cfg.kernel, cfg.radius);
+          }
         }
         const double thread_interior_us =
             phasegap::stats::DurationMicros(interior_start, phasegap::stats::SteadyClock::now());
@@ -385,11 +436,17 @@ int main(int argc, char** argv) {
         const phasegap::stats::TimePoint boundary_start = phasegap::stats::SteadyClock::now();
 #pragma omp for schedule(runtime)
         for (int i = buffers.OwnedBegin(); i < left_boundary_end; ++i) {
-          buffers.next[static_cast<std::size_t>(i)] = UpdatePoint(buffers, i, cfg.kernel, cfg.radius);
+          if (mpi_ok) {
+            buffers.next[static_cast<std::size_t>(i)] =
+                UpdatePoint(buffers, i, cfg.kernel, cfg.radius);
+          }
         }
 #pragma omp for schedule(runtime)
         for (int i = right_boundary_begin; i < buffers.OwnedEnd(); ++i) {
-          buffers.next[static_cast<std::size_t>(i)] = UpdatePoint(buffers, i, cfg.kernel, cfg.radius);
+          if (mpi_ok) {
+            buffers.next[static_cast<std::size_t>(i)] =
+                UpdatePoint(buffers, i, cfg.kernel, cfg.radius);
+          }
         }
         const double thread_boundary_us =
             phasegap::stats::DurationMicros(boundary_start, phasegap::stats::SteadyClock::now());
@@ -400,6 +457,14 @@ int main(int argc, char** argv) {
         }
 #pragma omp master
         timer.EndBoundary();
+      }
+
+      if (!mpi_ok) {
+        if (use_persistent_requests) {
+          FreePersistentRequests(persistent_reqs);
+        }
+        MPI_Finalize();
+        return EXIT_FAILURE;
       }
     } else {
       MPI_Request reqs[4] = {MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL};
@@ -906,6 +971,7 @@ int main(int argc, char** argv) {
     csv_summary.omp_threads = omp_threads;
     csv_summary.mpi_thread_provided = provided;
     csv_summary.measured_iters = measured_iters;
+    csv_summary.transport_effective = transport_selection.effective;
     csv_summary.checksum64 = checksum64_global;
     csv_summary.msg_bytes = bw.msg_bytes;
     csv_summary.bytes_total = bw.bytes_total;
@@ -993,7 +1059,8 @@ int main(int argc, char** argv) {
       summary.polls_to_complete_mean = polls_to_complete_mean_avg;
       summary.polls_to_complete_p95 = polls_to_complete_p95_avg;
       const bool manifest_ok =
-          phasegap::stats::WriteManifest(cfg, summary, provided, "manifest");
+          phasegap::stats::WriteManifest(cfg, summary, provided, transport_selection.effective,
+                                         "manifest");
       if (!manifest_ok) {
         MPI_Finalize();
         return EXIT_FAILURE;
@@ -1007,6 +1074,7 @@ int main(int argc, char** argv) {
       trace_summary.measured_iters = measured_iters;
       trace_summary.trace_iters = trace_window_iters;
       trace_summary.mpi_thread_provided = provided;
+      trace_summary.transport_effective = transport_selection.effective;
       trace_summary.t_post_us = t_post_mean_avg;
       trace_summary.t_interior_us = t_interior_mean_avg;
       trace_summary.t_wait_us = t_wait_mean_avg;
@@ -1086,6 +1154,8 @@ int main(int argc, char** argv) {
               << " | polls_to_complete_p95=" << polls_to_complete_p95_avg
               << " | mpi_thread_requested=" << phasegap::cli::ToString(cfg.mpi_thread)
               << " | mpi_thread_provided=" << provided
+              << " | transport_requested=" << phasegap::cli::ToString(cfg.transport)
+              << " | transport_effective=" << transport_selection.effective
               << '\n';
   }
 

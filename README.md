@@ -117,6 +117,7 @@ Required/primary artifacts:
 - `trace.json`: Chrome/Perfetto trace when tracing is enabled
 
 Common metric fields to inspect first:
+- transport provenance: `transport_requested`, `transport_effective`
 - timing means: `t_iter_us`, `t_post_us`, `t_interior_us`, `t_wait_us`, `t_boundary_us`, `t_comm_window_us`
 - timing distribution: `*_p50_us`, `*_p95_us`
 - rank bottleneck indicators: `*_mean_max_us`, `wait_skew`

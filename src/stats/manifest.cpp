@@ -113,7 +113,8 @@ std::string ToJsonBool(bool value) { return value ? "true" : "false"; }
 }  // namespace
 
 bool WriteManifest(const cli::Config& cfg, const RuntimeSummary& summary,
-                   int mpi_thread_provided, const std::string& error_prefix) {
+                   int mpi_thread_provided, const std::string& transport_effective,
+                   const std::string& error_prefix) {
   namespace fs = std::filesystem;
   std::error_code ec;
   fs::create_directories(cfg.out_dir, ec);
@@ -131,7 +132,7 @@ bool WriteManifest(const cli::Config& cfg, const RuntimeSummary& summary,
   }
 
   out << "{\n";
-  out << "  \"schema_version\": 1,\n";
+  out << "  \"schema_version\": 2,\n";
   out << "  \"timestamp\": \"" << JsonEscape(CurrentTimestampUtc()) << "\",\n";
   out << "  \"run_id\": \"" << JsonEscape(cfg.run_id) << "\",\n";
   out << "  \"git_sha\": \"" << JsonEscape(GitSha()) << "\",\n";
@@ -148,7 +149,8 @@ bool WriteManifest(const cli::Config& cfg, const RuntimeSummary& summary,
   out << "    \"omp_schedule\": \"" << cli::ToString(cfg.omp_schedule) << "\",\n";
   out << "    \"omp_places\": \"" << cli::ToString(cfg.omp_places) << "\",\n";
   out << "    \"sync\": \"" << cli::ToString(cfg.sync) << "\",\n";
-  out << "    \"transport\": \"" << cli::ToString(cfg.transport) << "\",\n";
+  out << "    \"transport_requested\": \"" << cli::ToString(cfg.transport) << "\",\n";
+  out << "    \"transport_effective\": \"" << JsonEscape(transport_effective) << "\",\n";
   out << "    \"trace_detail\": \"" << cli::ToString(cfg.trace_detail) << "\",\n";
   out << "    \"csv_mode\": \"" << cli::ToString(cfg.csv_mode) << "\",\n";
   out << "    \"ranks\": " << cfg.ranks << ",\n";
@@ -180,7 +182,8 @@ bool WriteManifest(const cli::Config& cfg, const RuntimeSummary& summary,
   out << "    \"OMP_PLACES\": \"" << JsonEscape(GetEnv("OMP_PLACES")) << "\",\n";
   out << "    \"OMP_SCHEDULE\": \"" << JsonEscape(GetEnv("OMP_SCHEDULE")) << "\",\n";
   out << "    \"OMP_DISPLAY_ENV\": \"" << JsonEscape(GetEnv("OMP_DISPLAY_ENV")) << "\",\n";
-  out << "    \"OMPI_MCA_btl\": \"" << JsonEscape(GetEnv("OMPI_MCA_btl")) << "\"\n";
+  out << "    \"OMPI_MCA_btl\": \"" << JsonEscape(GetEnv("OMPI_MCA_btl")) << "\",\n";
+  out << "    \"OMPI_MCA_pml\": \"" << JsonEscape(GetEnv("OMPI_MCA_pml")) << "\"\n";
   out << "  },\n";
 
   out << "  \"runtime_summary\": {\n";
