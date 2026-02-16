@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${ROOT_DIR}/build-matrix"
 RUN_ROOT="${ROOT_DIR}/runs/matrix"
 INDEX_PATH="${ROOT_DIR}/results/results.csv"
+INDEX_ENABLED=1
+INDEX_PATH_EXPLICIT=0
 GENERATOR=""
 CORE_BUDGET=0
 SWEEPS="1,2,3"
@@ -41,6 +43,7 @@ Options:
   --build-dir <path>      CMake build directory (default: ./build-matrix)
   --run-root <path>       Root directory for run outputs (default: ./runs/matrix)
   --index <path>          Optional append-only index CSV (default: ./results/results.csv)
+  --no-index              Disable aggregate index writes (per-run artifacts remain canonical)
   --generator <name>      CMake generator (default: Ninja if available)
   --core-budget <C>       Core budget for sweep planning (default: auto-detect)
   --sweeps <list>         Comma-separated sweep ids to run (default: 1,2,3)
@@ -73,7 +76,12 @@ while [[ $# -gt 0 ]]; do
     --index)
       require_option_value "$1" "${2:-}"
       INDEX_PATH="$2"
+      INDEX_PATH_EXPLICIT=1
       shift 2
+      ;;
+    --no-index)
+      INDEX_ENABLED=0
+      shift
       ;;
     --generator)
       require_option_value "$1" "${2:-}"
@@ -172,6 +180,10 @@ if (( ITERS <= WARMUP )); then
   exit 1
 fi
 
+if (( INDEX_ENABLED == 0 && INDEX_PATH_EXPLICIT == 1 )); then
+  echo "[matrix] warn: both --index and --no-index were provided; ignoring --index and disabling aggregate writes"
+fi
+
 detect_core_budget() {
   if [[ "${CORE_BUDGET}" -gt 0 ]]; then
     echo "${CORE_BUDGET}"
@@ -204,7 +216,7 @@ sanitize_run_id() {
 }
 
 ensure_index_header() {
-  if (( DRY_RUN == 1 )); then
+  if (( DRY_RUN == 1 || INDEX_ENABLED == 0 )); then
     return
   fi
   local index_dir
@@ -214,6 +226,14 @@ ensure_index_header() {
     echo "timestamp,run_id,sweep,mode,ranks,threads,halo,flops_per_point,bytes_per_point,status,run_dir" \
       >"${INDEX_PATH}"
   fi
+}
+
+append_index_row() {
+  local row="$1"
+  if (( DRY_RUN == 1 || INDEX_ENABLED == 0 )); then
+    return
+  fi
+  echo "${row}" >>"${INDEX_PATH}"
 }
 
 configure_and_build() {
@@ -294,11 +314,11 @@ run_one() {
   if (( rc != 0 )); then
     ((FAIL_COUNT += 1))
     echo "[matrix] fail rc=${rc} run_id=${run_id} (see ${log_path})"
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ),${run_id},${sweep},${mode},${ranks},${threads},${halo},${flops},${BYTES_PER_POINT},fail,${run_dir}" >>"${INDEX_PATH}"
+    append_index_row "$(date -u +%Y-%m-%dT%H:%M:%SZ),${run_id},${sweep},${mode},${ranks},${threads},${halo},${flops},${BYTES_PER_POINT},fail,${run_dir}"
     return
   fi
 
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ),${run_id},${sweep},${mode},${ranks},${threads},${halo},${flops},${BYTES_PER_POINT},ok,${run_dir}" >>"${INDEX_PATH}"
+  append_index_row "$(date -u +%Y-%m-%dT%H:%M:%SZ),${run_id},${sweep},${mode},${ranks},${threads},${halo},${flops},${BYTES_PER_POINT},ok,${run_dir}"
 }
 
 run_sweep_1() {
@@ -373,7 +393,11 @@ CORE_BUDGET="$(detect_core_budget)"
 echo "[matrix] root=${ROOT_DIR}"
 echo "[matrix] build_dir=${BUILD_DIR}"
 echo "[matrix] run_root=${RUN_ROOT}"
-echo "[matrix] index=${INDEX_PATH}"
+if (( INDEX_ENABLED == 1 )); then
+  echo "[matrix] index=${INDEX_PATH}"
+else
+  echo "[matrix] index=disabled (--no-index)"
+fi
 echo "[matrix] sweeps=${SWEEPS}"
 echo "[matrix] core_budget=${CORE_BUDGET}"
 echo "[matrix] trace=${TRACE} trace_iters=${TRACE_ITERS}"

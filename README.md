@@ -202,6 +202,12 @@ scripts/run_matrix.sh \
   --trace-iters 30
 ```
 
+To keep per-run artifacts as the only outputs (no aggregate catalog writes), add:
+
+```bash
+scripts/run_matrix.sh --no-index --sweeps 1
+```
+
 Dry-run planning (no run execution):
 
 ```bash
