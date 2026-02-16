@@ -1,3 +1,16 @@
 AGENTS.md
 PLAN.md
 
+
+# bv (beads viewer) local config and caches
+.bv/
+
+# CMake out-of-tree build directory
+build/
+build-smoke*/
+
+# local smoke artifacts
+runs/smoke*/
+
+# python cache from helper scripts
+scripts/__pycache__/

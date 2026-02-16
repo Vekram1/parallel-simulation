@@ -1,0 +1,37 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build openmpi-bin libopenmpi-dev python3
+
+      - name: Smoke build and run
+        run: |
+          chmod +x scripts/smoke_build.sh
+          scripts/smoke_build.sh \
+            --build-dir build-ci \
+            --run-dir runs/ci-smoke \
+            --np 2 \
+            --threads 2 \
+            --n-local 256 \
+            --halo 8 \
+            --iters 8 \
+            --warmup 2
+
+      - name: Upload smoke log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-log
+          path: runs/ci-smoke/smoke.stdout.log
