@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <string>
 #include <vector>
 
 #include "phasegap/cli.hpp"
@@ -44,6 +45,27 @@ const char* MpiThreadLevelName(int level) {
       return "multiple";
   }
   return "unknown";
+}
+
+void FreePersistentRequests(MPI_Request (&reqs)[4]) {
+  for (MPI_Request& req : reqs) {
+    if (req != MPI_REQUEST_NULL) {
+      MPI_Request_free(&req);
+    }
+  }
+}
+
+bool CheckMpiSuccess(int code, const char* op, int rank) {
+  if (code == MPI_SUCCESS) {
+    return true;
+  }
+  if (rank == 0) {
+    char errstr[MPI_MAX_ERROR_STRING];
+    int errlen = 0;
+    MPI_Error_string(code, errstr, &errlen);
+    std::cerr << op << " failed: " << std::string(errstr, static_cast<std::size_t>(errlen)) << '\n';
+  }
+  return false;
 }
 
 omp_sched_t RequestedOmpSchedule(phasegap::cli::OmpSchedule schedule) {
@@ -127,7 +149,7 @@ int main(int argc, char** argv) {
               << " but runtime provided " << MpiThreadLevelName(provided) << '\n';
   }
 
-  if (cfg.mode == phasegap::cli::Mode::kPhasePersist || cfg.mode == phasegap::cli::Mode::kOmpTasks) {
+  if (cfg.mode == phasegap::cli::Mode::kOmpTasks) {
     if (rank == 0) {
       std::cerr << "Selected mode is declared in CLI but not implemented yet: "
                 << phasegap::cli::ToString(cfg.mode) << '\n';
@@ -149,6 +171,7 @@ int main(int argc, char** argv) {
   const phasegap::mpi::RingNeighbors neighbors =
       phasegap::mpi::ComputeRingNeighbors(rank, world_size);
   phasegap::mpi::LocalBuffers buffers(cfg.n_local, cfg.halo);
+  const bool use_persistent_requests = (cfg.mode == phasegap::cli::Mode::kPhasePersist);
   double halo_sum = 0.0;
   std::uint64_t checksum64_global = 0;
   phasegap::stats::IterationTiming timing_sum{};
@@ -159,6 +182,31 @@ int main(int argc, char** argv) {
 
   if (cfg.sync == phasegap::cli::SyncMode::kBarrierStart) {
     MPI_Barrier(MPI_COMM_WORLD);
+  }
+
+  std::vector<double> send_left(static_cast<std::size_t>(cfg.halo), 0.0);
+  std::vector<double> send_right(static_cast<std::size_t>(cfg.halo), 0.0);
+  std::vector<double> recv_left(static_cast<std::size_t>(cfg.halo), 0.0);
+  std::vector<double> recv_right(static_cast<std::size_t>(cfg.halo), 0.0);
+  MPI_Request persistent_reqs[4] = {MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL,
+                                    MPI_REQUEST_NULL};
+  if (use_persistent_requests) {
+    if (!CheckMpiSuccess(MPI_Recv_init(recv_left.data(), cfg.halo, MPI_DOUBLE, neighbors.left, 101,
+                                       MPI_COMM_WORLD, &persistent_reqs[0]),
+                         "MPI_Recv_init(left)", rank) ||
+        !CheckMpiSuccess(MPI_Recv_init(recv_right.data(), cfg.halo, MPI_DOUBLE, neighbors.right,
+                                       100, MPI_COMM_WORLD, &persistent_reqs[1]),
+                         "MPI_Recv_init(right)", rank) ||
+        !CheckMpiSuccess(MPI_Send_init(send_left.data(), cfg.halo, MPI_DOUBLE, neighbors.left, 100,
+                                       MPI_COMM_WORLD, &persistent_reqs[2]),
+                         "MPI_Send_init(left)", rank) ||
+        !CheckMpiSuccess(MPI_Send_init(send_right.data(), cfg.halo, MPI_DOUBLE, neighbors.right,
+                                       101, MPI_COMM_WORLD, &persistent_reqs[3]),
+                         "MPI_Send_init(right)", rank)) {
+      FreePersistentRequests(persistent_reqs);
+      MPI_Finalize();
+      return EXIT_FAILURE;
+    }
   }
 
   for (int iter = 0; iter < cfg.iters; ++iter) {
@@ -186,10 +234,12 @@ int main(int argc, char** argv) {
       }
     }
 
-    const std::vector<double> send_left = phasegap::mpi::PackLeftHalo(buffers);
-    const std::vector<double> send_right = phasegap::mpi::PackRightHalo(buffers);
-    std::vector<double> recv_left(static_cast<std::size_t>(cfg.halo));
-    std::vector<double> recv_right(static_cast<std::size_t>(cfg.halo));
+    for (int i = 0; i < cfg.halo; ++i) {
+      send_left[static_cast<std::size_t>(i)] =
+          buffers.current[static_cast<std::size_t>(buffers.OwnedBegin() + i)];
+      send_right[static_cast<std::size_t>(i)] =
+          buffers.current[static_cast<std::size_t>(buffers.OwnedEnd() - cfg.halo + i)];
+    }
 
     if (cfg.mode == phasegap::cli::Mode::kPhaseBlk) {
       timer.BeginCommWindow();
@@ -242,13 +292,23 @@ int main(int argc, char** argv) {
         timer.EndBoundary();
       }
     } else {
-      MPI_Request reqs[4];
+      MPI_Request reqs[4] = {MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL};
+      MPI_Request* active_reqs = reqs;
       timer.BeginCommWindow();
       timer.BeginPost();
-      MPI_Irecv(recv_left.data(), cfg.halo, MPI_DOUBLE, neighbors.left, 101, MPI_COMM_WORLD, &reqs[0]);
-      MPI_Irecv(recv_right.data(), cfg.halo, MPI_DOUBLE, neighbors.right, 100, MPI_COMM_WORLD, &reqs[1]);
-      MPI_Isend(send_left.data(), cfg.halo, MPI_DOUBLE, neighbors.left, 100, MPI_COMM_WORLD, &reqs[2]);
-      MPI_Isend(send_right.data(), cfg.halo, MPI_DOUBLE, neighbors.right, 101, MPI_COMM_WORLD, &reqs[3]);
+      if (use_persistent_requests) {
+        MPI_Startall(4, persistent_reqs);
+        active_reqs = persistent_reqs;
+      } else {
+        MPI_Irecv(recv_left.data(), cfg.halo, MPI_DOUBLE, neighbors.left, 101, MPI_COMM_WORLD,
+                  &reqs[0]);
+        MPI_Irecv(recv_right.data(), cfg.halo, MPI_DOUBLE, neighbors.right, 100, MPI_COMM_WORLD,
+                  &reqs[1]);
+        MPI_Isend(send_left.data(), cfg.halo, MPI_DOUBLE, neighbors.left, 100, MPI_COMM_WORLD,
+                  &reqs[2]);
+        MPI_Isend(send_right.data(), cfg.halo, MPI_DOUBLE, neighbors.right, 101, MPI_COMM_WORLD,
+                  &reqs[3]);
+      }
       timer.EndPost();
 
       const int interior_begin = buffers.OwnedBegin() + cfg.boundary_width;
@@ -284,7 +344,7 @@ int main(int argc, char** argv) {
                 poll_budget += static_cast<std::uint64_t>(k);
               }
               timer.BeginPoll();
-              MPI_Testall(4, reqs, &completed, MPI_STATUSES_IGNORE);
+              MPI_Testall(4, active_reqs, &completed, MPI_STATUSES_IGNORE);
               ++mpi_test_calls;
               timer.EndPoll();
             }
@@ -299,7 +359,7 @@ int main(int argc, char** argv) {
           {
             timer.BeginWait();
             if (!completed) {
-              MPI_Waitall(4, reqs, MPI_STATUSES_IGNORE);
+              MPI_Waitall(4, active_reqs, MPI_STATUSES_IGNORE);
               ++mpi_wait_calls;
             }
             timer.EndWait();
@@ -346,7 +406,7 @@ int main(int argc, char** argv) {
 #pragma omp master
           {
             timer.BeginWait();
-            MPI_Waitall(4, reqs, MPI_STATUSES_IGNORE);
+            MPI_Waitall(4, active_reqs, MPI_STATUSES_IGNORE);
             ++mpi_wait_calls;
             timer.EndWait();
             timer.EndCommWindow();
@@ -402,6 +462,10 @@ int main(int argc, char** argv) {
       mpi_wait_calls_sum_local += static_cast<double>(mpi_wait_calls);
       ++measured_iters;
     }
+  }
+
+  if (use_persistent_requests) {
+    FreePersistentRequests(persistent_reqs);
   }
 
   if (measured_iters == 0) {
