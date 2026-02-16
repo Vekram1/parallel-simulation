@@ -35,6 +35,48 @@ require_option_value() {
   fi
 }
 
+require_nonneg_int() {
+  local opt="$1"
+  local value="$2"
+  if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+    echo "[matrix] fail: ${opt} must be a non-negative integer (got '${value}')" >&2
+    exit 2
+  fi
+}
+
+require_pos_int() {
+  local opt="$1"
+  local value="$2"
+  if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[matrix] fail: ${opt} must be a positive integer (got '${value}')" >&2
+    exit 2
+  fi
+}
+
+require_bool_01() {
+  local opt="$1"
+  local value="$2"
+  if [[ "${value}" != "0" && "${value}" != "1" ]]; then
+    echo "[matrix] fail: ${opt} must be 0 or 1 (got '${value}')" >&2
+    exit 2
+  fi
+}
+
+validate_sweeps_list() {
+  local value="$1"
+  local token
+  IFS=',' read -r -a tokens <<<"${value}"
+  for token in "${tokens[@]}"; do
+    case "${token}" in
+      ""|1|2|3) ;;
+      *)
+        echo "[matrix] fail: --sweeps accepts comma-separated subset of 1,2,3 (got '${token}' in '${value}')" >&2
+        exit 2
+        ;;
+    esac
+  done
+}
+
 usage() {
   cat <<'USAGE'
 Usage: scripts/run_matrix.sh [options]
@@ -158,13 +200,25 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if ! command -v cmake >/dev/null 2>&1; then
-  echo "[matrix] fail: cmake not found in PATH" >&2
-  exit 1
-fi
-if ! command -v mpirun >/dev/null 2>&1; then
-  echo "[matrix] fail: mpirun not found in PATH" >&2
-  exit 1
+require_nonneg_int "--core-budget" "${CORE_BUDGET}"
+require_bool_01 "--trace" "${TRACE}"
+require_pos_int "--trace-iters" "${TRACE_ITERS}"
+require_nonneg_int "--max-runs" "${MAX_RUNS}"
+require_pos_int "--n-local" "${N_LOCAL}"
+require_pos_int "--iters" "${ITERS}"
+require_nonneg_int "--warmup" "${WARMUP}"
+require_nonneg_int "--bytes-per-point" "${BYTES_PER_POINT}"
+validate_sweeps_list "${SWEEPS}"
+
+if (( DRY_RUN == 0 )); then
+  if ! command -v cmake >/dev/null 2>&1; then
+    echo "[matrix] fail: cmake not found in PATH" >&2
+    exit 1
+  fi
+  if ! command -v mpirun >/dev/null 2>&1; then
+    echo "[matrix] fail: mpirun not found in PATH" >&2
+    exit 1
+  fi
 fi
 
 if [[ -z "${GENERATOR}" ]]; then
@@ -386,7 +440,9 @@ run_sweep_3() {
   done
 }
 
-mkdir -p "${RUN_ROOT}"
+if (( DRY_RUN == 0 )); then
+  mkdir -p "${RUN_ROOT}"
+fi
 ensure_index_header
 CORE_BUDGET="$(detect_core_budget)"
 

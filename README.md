@@ -214,6 +214,8 @@ Dry-run planning (no run execution):
 scripts/run_matrix.sh --dry-run --max-runs 4
 ```
 
+`--dry-run` is planning-only and does not require `cmake`/`mpirun` in `PATH`.
+
 ## macOS OpenMP Configure Helper
 
 If CMake cannot detect OpenMP on macOS, use:
