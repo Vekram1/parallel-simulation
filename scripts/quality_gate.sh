@@ -227,6 +227,30 @@ require_file_contains() {
   fail_or_warn "${fail_msg}" "${warn_msg}"
 }
 
+require_json_int_ge() {
+  local path="$1"
+  local key="$2"
+  local min_value="$3"
+  if ! python3 - "$path" "$key" "$min_value" <<'PY'
+import json
+import sys
+
+path, key, min_value = sys.argv[1], sys.argv[2], int(sys.argv[3])
+with open(path, "r", encoding="utf-8") as f:
+    obj = json.load(f)
+value = obj.get(key)
+if not isinstance(value, int):
+    raise SystemExit(2)
+if value < min_value:
+    raise SystemExit(3)
+PY
+  then
+    fail_or_warn \
+      "json key ${key} missing or below minimum ${min_value} (${path})" \
+      "json key ${key} missing or below minimum ${min_value} (${path})"
+  fi
+}
+
 require_csv_column() {
   local path="$1"
   local column="$2"
@@ -282,6 +306,8 @@ validate_manifest_schema() {
     return 0
   fi
 
+  require_json_int_ge "${path}" "schema_version" 3
+
   require_file_contains \
     "${path}" "\"timestamp\"" \
     "manifest missing required key: timestamp (${path})" \
@@ -302,6 +328,14 @@ validate_manifest_schema() {
     "${path}" "\"transport_effective\"" \
     "manifest missing required key: transport_effective (${path})" \
     "manifest missing key transport_effective (${path})"
+  require_file_contains \
+    "${path}" "\"progress_requested\"" \
+    "manifest missing required key: progress_requested (${path})" \
+    "manifest missing key progress_requested (${path})"
+  require_file_contains \
+    "${path}" "\"progress_effective\"" \
+    "manifest missing required key: progress_effective (${path})" \
+    "manifest missing key progress_effective (${path})"
 }
 
 validate_csv_schema() {
@@ -331,6 +365,11 @@ validate_csv_schema() {
       "csv last row schema_version is not an integer: '${tail_schema}' (${path})" \
       "csv last row schema_version is not an integer: '${tail_schema}' (${path})"
   fi
+  if (( tail_schema < 2 )); then
+    fail_or_warn \
+      "csv schema_version too old (need >=2, got ${tail_schema}) (${path})" \
+      "csv schema_version too old (need >=2, got ${tail_schema}) (${path})"
+  fi
 
   local tail_mode
   if ! tail_mode="$(csv_last_field_by_name "${path}" "mode")"; then
@@ -355,6 +394,8 @@ validate_trace_schema() {
     return 0
   fi
 
+  require_json_int_ge "${path}" "trace_schema_version" 3
+
   require_file_contains \
     "${path}" "\"traceEvents\"" \
     "trace missing traceEvents array (${path})" \
@@ -367,6 +408,14 @@ validate_trace_schema() {
     "${path}" "\"transport_effective\"" \
     "trace missing transport_effective metadata (${path})" \
     "trace missing transport_effective metadata (${path})"
+  require_file_contains \
+    "${path}" "\"progress_requested\"" \
+    "trace missing progress_requested metadata (${path})" \
+    "trace missing progress_requested metadata (${path})"
+  require_file_contains \
+    "${path}" "\"progress_effective\"" \
+    "trace missing progress_effective metadata (${path})" \
+    "trace missing progress_effective metadata (${path})"
 
   local label
   for label in comm_post interior_compute waitall boundary_compute; do
