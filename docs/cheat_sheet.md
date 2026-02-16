@@ -1,5 +1,7 @@
 # Two paradigms
 
+See also: `docs/methodology.md` for threats-to-validity and interpretation limits when reading PhaseGap results.
+
 ## OpenMP / Threads = shared-memory parallelism
 - One process, one address space.
 - Threads can read/write the same arrays directly.
