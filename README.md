@@ -216,6 +216,12 @@ scripts/run_matrix.sh --dry-run --max-runs 4
 
 `--dry-run` is planning-only and does not require `cmake`/`mpirun` in `PATH`.
 
+Input constraints (fail-fast validation):
+- `--trace` must be `0` or `1`
+- `--sweeps` must be a comma-separated subset of `1,2,3`
+- `--trace-iters`, `--n-local`, `--iters` must be positive integers
+- `--core-budget`, `--max-runs`, `--warmup`, `--bytes-per-point` must be non-negative integers
+
 ## macOS OpenMP Configure Helper
 
 If CMake cannot detect OpenMP on macOS, use:

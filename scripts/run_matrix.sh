@@ -64,11 +64,16 @@ require_bool_01() {
 
 validate_sweeps_list() {
   local value="$1"
-  local token
+  local raw_token token
   IFS=',' read -r -a tokens <<<"${value}"
-  for token in "${tokens[@]}"; do
+  for raw_token in "${tokens[@]}"; do
+    token="$(printf '%s' "${raw_token}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    if [[ -z "${token}" ]]; then
+      echo "[matrix] fail: --sweeps entries cannot be empty (got '${value}')" >&2
+      exit 2
+    fi
     case "${token}" in
-      ""|1|2|3) ;;
+      1|2|3) ;;
       *)
         echo "[matrix] fail: --sweeps accepts comma-separated subset of 1,2,3 (got '${token}' in '${value}')" >&2
         exit 2
