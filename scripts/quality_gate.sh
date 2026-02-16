@@ -14,6 +14,7 @@ BUILD_DIR="${ROOT_DIR}/build"
 RUN_DIR="${ROOT_DIR}/runs/quality-gate"
 LOG_DIR="${RUN_DIR}/logs"
 STDOUT_LOG="${LOG_DIR}/sanity.stdout.log"
+RUN_START_MARKER="${LOG_DIR}/run.start.marker"
 CSV_PATH="${RUN_DIR}/results.csv"
 MANIFEST_PATH="${RUN_DIR}/manifest.json"
 TRACE_PATH="${RUN_DIR}/trace.json"
@@ -75,6 +76,16 @@ require_csv_column() {
   fail_or_warn \
     "csv header missing ${column} (${path})" \
     "csv header missing ${column} (${path})"
+}
+
+require_artifact_fresh() {
+  local path="$1"
+  local marker="$2"
+  if [[ "${marker}" -nt "${path}" ]]; then
+    fail_or_warn \
+      "artifact is stale (older than current run): ${path}" \
+      "artifact appears stale (older than current run): ${path}"
+  fi
 }
 
 validate_manifest_schema() {
@@ -140,7 +151,9 @@ fi
 require_rg
 
 echo "[gate] sanity run"
-mpirun -np 2 "${BUILD_DIR}/phasegap" \
+: >"${STDOUT_LOG}"
+: >"${RUN_START_MARKER}"
+if ! mpirun -np 2 "${BUILD_DIR}/phasegap" \
   --mode phase_nb \
   --ranks 2 \
   --threads 1 \
@@ -153,7 +166,11 @@ mpirun -np 2 "${BUILD_DIR}/phasegap" \
   --out_dir "${RUN_DIR}" \
   --csv "${RUN_DIR}/results.csv" \
   --manifest 1 \
-  >"${STDOUT_LOG}" 2>&1
+  >"${STDOUT_LOG}" 2>&1; then
+  echo "[gate] fail: sanity run failed" >&2
+  cat "${STDOUT_LOG}" >&2
+  exit 1
+fi
 
 if ! rg -q "phasegap skeleton ready" "${STDOUT_LOG}"; then
   echo "[gate] fail: sanity output missing run summary" >&2
@@ -171,6 +188,7 @@ done
 
 if [[ -f "${MANIFEST_PATH}" ]]; then
   echo "[gate] manifest: ok (${MANIFEST_PATH})"
+  require_artifact_fresh "${MANIFEST_PATH}" "${RUN_START_MARKER}"
   validate_manifest_schema "${MANIFEST_PATH}"
 else
   if [[ ${STRICT_ARTIFACTS} -eq 1 ]]; then
@@ -182,6 +200,7 @@ fi
 
 if [[ -f "${CSV_PATH}" ]]; then
   echo "[gate] csv: ok (${CSV_PATH})"
+  require_artifact_fresh "${CSV_PATH}" "${RUN_START_MARKER}"
   validate_csv_schema "${CSV_PATH}"
 else
   if [[ ${STRICT_ARTIFACTS} -eq 1 ]]; then
@@ -193,6 +212,7 @@ fi
 
 if [[ -f "${TRACE_PATH}" ]]; then
   echo "[gate] trace: ok (${TRACE_PATH})"
+  require_artifact_fresh "${TRACE_PATH}" "${RUN_START_MARKER}"
   validate_trace_schema "${TRACE_PATH}"
 else
   if [[ ${STRICT_ARTIFACTS} -eq 1 ]]; then
