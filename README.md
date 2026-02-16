@@ -222,6 +222,55 @@ Input constraints (fail-fast validation):
 - `--trace-iters`, `--n-local`, `--iters` must be positive integers
 - `--core-budget`, `--max-runs`, `--warmup`, `--bytes-per-point` must be non-negative integers
 
+## Linux Netem Workflow
+
+Linux-only impairment helpers are available for communication sensitivity studies:
+- `scripts/netem_on.sh`
+- `scripts/netem_off.sh`
+
+Safety and scope notes:
+- real apply/clear requires root (`sudo`) and Linux `tc` (iproute2)
+- `--dry-run` preview does not require root or Linux
+- applies qdisc at interface level, so it affects all traffic on that interface
+- always clear impairment with `scripts/netem_off.sh` after experiments
+
+List available impairment presets:
+
+```bash
+scripts/netem_on.sh --list-presets
+```
+
+Apply a preset (example):
+
+```bash
+sudo scripts/netem_on.sh --iface eth0 --preset wan_mild
+```
+
+Apply explicit overrides (example with bandwidth cap):
+
+```bash
+sudo scripts/netem_on.sh \
+  --iface eth0 \
+  --preset constrained_50 \
+  --delay-ms 25 \
+  --jitter-ms 6 \
+  --loss-pct 0.3 \
+  --rate 50mbit
+```
+
+Clear impairment:
+
+```bash
+sudo scripts/netem_off.sh --iface eth0
+```
+
+Preview commands without changing the system:
+
+```bash
+scripts/netem_on.sh --iface eth0 --preset wan_mild --dry-run
+scripts/netem_off.sh --iface eth0 --dry-run
+```
+
 ## macOS OpenMP Configure Helper
 
 If CMake cannot detect OpenMP on macOS, use:
