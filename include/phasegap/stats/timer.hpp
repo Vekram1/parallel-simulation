@@ -40,6 +40,7 @@ class IterationTimer {
   void BeginPoll();
   void EndPoll();
   void SetInteriorMicros(double us);
+  void SetPollMicros(double us);
 
   const IterationTiming& Current() const;
   void Reset();

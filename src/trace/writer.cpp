@@ -118,7 +118,7 @@ bool WriteTrace(const cli::Config& cfg, const TraceSummary& summary, const char*
   }
 
   out << "{\n";
-  out << "  \"trace_schema_version\": 2,\n";
+  out << "  \"trace_schema_version\": 3,\n";
   out << "  \"timestamp\": \"" << JsonEscape(CurrentTimestampUtc()) << "\",\n";
   out << "  \"run_id\": \"" << JsonEscape(cfg.run_id) << "\",\n";
   out << "  \"git_sha\": \"" << JsonEscape(GitSha()) << "\",\n";
@@ -128,6 +128,8 @@ bool WriteTrace(const cli::Config& cfg, const TraceSummary& summary, const char*
   out << "    \"mode\": \"" << cli::ToString(cfg.mode) << "\",\n";
   out << "    \"kernel\": \"" << cli::ToString(cfg.kernel) << "\",\n";
   out << "    \"trace_detail\": \"" << cli::ToString(cfg.trace_detail) << "\",\n";
+  out << "    \"progress_requested\": \"" << cli::ToString(cfg.progress) << "\",\n";
+  out << "    \"progress_effective\": \"" << JsonEscape(summary.progress_effective) << "\",\n";
   out << "    \"ranks\": " << summary.ranks << ",\n";
   out << "    \"omp_threads\": " << summary.omp_threads << ",\n";
   out << "    \"trace_iters\": " << summary.trace_iters << ",\n";

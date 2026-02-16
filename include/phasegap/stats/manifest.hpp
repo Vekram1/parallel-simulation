@@ -52,7 +52,8 @@ struct RuntimeSummary {
 
 // Writes a run manifest at "<cfg.out_dir>/manifest.json". Returns false on failure.
 bool WriteManifest(const cli::Config& cfg, const RuntimeSummary& summary,
-                   int mpi_thread_provided, const std::string& transport_effective,
+                   int mpi_thread_provided, const std::string& progress_effective,
+                   const std::string& transport_effective,
                    const std::string& error_prefix);
 
 }  // namespace phasegap::stats

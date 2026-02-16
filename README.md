@@ -60,10 +60,11 @@ Supported orchestration modes:
 - `phase_blk`: blocking exchange baseline (expected overlap near zero)
 - `nb_test`: nonblocking + periodic `MPI_Testall` progression with polling metrics
 - `phase_persist`: persistent request path (`MPI_*_init` + `MPI_Startall`)
+- `omp_tasks`: stretch mode using OpenMP `taskloop` orchestration with baseline-compatible phase boundaries
 
-Not implemented (CLI recognized but exits with warning):
-- `omp_tasks`
-- `progress_thread`
+Progress options:
+- `inline_poll`: baseline behavior
+- `progress_thread`: helper-thread `MPI_Testall` progression when MPI provides `MPI_THREAD_MULTIPLE`; otherwise falls back to `inline_poll` with warning
 
 ## Quality Gates
 

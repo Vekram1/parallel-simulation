@@ -113,7 +113,8 @@ std::string ToJsonBool(bool value) { return value ? "true" : "false"; }
 }  // namespace
 
 bool WriteManifest(const cli::Config& cfg, const RuntimeSummary& summary,
-                   int mpi_thread_provided, const std::string& transport_effective,
+                   int mpi_thread_provided, const std::string& progress_effective,
+                   const std::string& transport_effective,
                    const std::string& error_prefix) {
   namespace fs = std::filesystem;
   std::error_code ec;
@@ -132,7 +133,7 @@ bool WriteManifest(const cli::Config& cfg, const RuntimeSummary& summary,
   }
 
   out << "{\n";
-  out << "  \"schema_version\": 2,\n";
+  out << "  \"schema_version\": 3,\n";
   out << "  \"timestamp\": \"" << JsonEscape(CurrentTimestampUtc()) << "\",\n";
   out << "  \"run_id\": \"" << JsonEscape(cfg.run_id) << "\",\n";
   out << "  \"git_sha\": \"" << JsonEscape(GitSha()) << "\",\n";
@@ -145,7 +146,8 @@ bool WriteManifest(const cli::Config& cfg, const RuntimeSummary& summary,
   out << "    \"kernel\": \"" << cli::ToString(cfg.kernel) << "\",\n";
   out << "    \"mpi_thread_requested\": \"" << cli::ToString(cfg.mpi_thread) << "\",\n";
   out << "    \"mpi_thread_provided\": " << mpi_thread_provided << ",\n";
-  out << "    \"progress\": \"" << cli::ToString(cfg.progress) << "\",\n";
+  out << "    \"progress_requested\": \"" << cli::ToString(cfg.progress) << "\",\n";
+  out << "    \"progress_effective\": \"" << JsonEscape(progress_effective) << "\",\n";
   out << "    \"omp_schedule\": \"" << cli::ToString(cfg.omp_schedule) << "\",\n";
   out << "    \"omp_places\": \"" << cli::ToString(cfg.omp_places) << "\",\n";
   out << "    \"sync\": \"" << cli::ToString(cfg.sync) << "\",\n";

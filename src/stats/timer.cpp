@@ -45,6 +45,7 @@ void IterationTimer::EndBoundary() {
 void IterationTimer::BeginPoll() { phase_start_ = SteadyClock::now(); }
 void IterationTimer::EndPoll() { timing_.t_poll_us += DurationMicros(phase_start_, SteadyClock::now()); }
 void IterationTimer::SetInteriorMicros(double us) { timing_.t_interior_us = us; }
+void IterationTimer::SetPollMicros(double us) { timing_.t_poll_us = us; }
 
 const IterationTiming& IterationTimer::Current() const { return timing_; }
 

@@ -2,12 +2,14 @@
 #include <omp.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <numeric>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -236,22 +238,29 @@ int main(int argc, char** argv) {
               << " but runtime provided " << MpiThreadLevelName(provided) << '\n';
   }
 
-  if (cfg.mode == phasegap::cli::Mode::kOmpTasks) {
-    if (rank == 0) {
-      std::cerr << "Selected mode is declared in CLI but not implemented yet: "
-                << phasegap::cli::ToString(cfg.mode) << '\n';
-    }
-    MPI_Finalize();
-    return EXIT_FAILURE;
+  const bool progress_thread_requested =
+      (cfg.progress == phasegap::cli::Progress::kProgressThread);
+  const bool progress_thread_supported = (provided >= MPI_THREAD_MULTIPLE);
+  const bool progress_thread_effective =
+      progress_thread_requested && progress_thread_supported &&
+      cfg.mode != phasegap::cli::Mode::kPhaseBlk &&
+      cfg.mode != phasegap::cli::Mode::kOmpTasks;
+  const phasegap::cli::Progress progress_effective =
+      progress_thread_effective ? phasegap::cli::Progress::kProgressThread
+                                : phasegap::cli::Progress::kInlinePoll;
+  if (progress_thread_requested && !progress_thread_supported && rank == 0) {
+    std::cerr << "Warning: --progress=progress_thread requested, but MPI provided "
+              << MpiThreadLevelName(provided)
+              << "; falling back to --progress=inline_poll\n";
   }
-  if (cfg.progress == phasegap::cli::Progress::kProgressThread) {
-    if (rank == 0) {
-      std::cerr << "--progress=progress_thread is not implemented yet\n";
-    }
-    MPI_Finalize();
-    return EXIT_FAILURE;
+  if (progress_thread_requested && cfg.mode == phasegap::cli::Mode::kPhaseBlk && rank == 0) {
+    std::cerr << "Warning: --progress=progress_thread has no effect in phase_blk mode; "
+                 "blocking mode does not use nonblocking progress\n";
   }
-
+  if (progress_thread_requested && cfg.mode == phasegap::cli::Mode::kOmpTasks && rank == 0) {
+    std::cerr << "Warning: --progress=progress_thread is not wired in omp_tasks mode; "
+                 "falling back to --progress=inline_poll semantics\n";
+  }
   omp_set_num_threads(cfg.threads);
   omp_set_schedule(RequestedOmpSchedule(cfg.omp_schedule), cfg.omp_chunk);
   EmitRuntimeWarnings(cfg, world_size, rank);
@@ -277,6 +286,7 @@ int main(int argc, char** argv) {
   double mpi_wait_calls_sum_local = 0.0;
   double polls_to_complete_sum_local = 0.0;
   int measured_iters = 0;
+  bool progress_thread_nbtest_warning_emitted = false;
 
   if (cfg.sync == phasegap::cli::SyncMode::kBarrierStart) {
     MPI_Barrier(MPI_COMM_WORLD);
@@ -508,7 +518,15 @@ int main(int argc, char** argv) {
       const int right_boundary_begin =
           std::max(left_boundary_end, buffers.OwnedEnd() - cfg.boundary_width);
 
-      if (cfg.mode == phasegap::cli::Mode::kNbTest) {
+      const bool use_progress_thread = progress_thread_effective;
+      if (rank == 0 && use_progress_thread && cfg.mode == phasegap::cli::Mode::kNbTest &&
+          !progress_thread_nbtest_warning_emitted) {
+        std::cerr << "Warning: --progress=progress_thread ignores --poll_every chunk cadence; "
+                     "helper thread drives MPI_Testall progress\n";
+        progress_thread_nbtest_warning_emitted = true;
+      }
+
+      if (cfg.mode == phasegap::cli::Mode::kNbTest && !use_progress_thread) {
         int completed = 0;
         double interior_work_us = 0.0;
 #pragma omp parallel shared(completed, interior_work_us)
@@ -596,8 +614,83 @@ int main(int argc, char** argv) {
 #pragma omp master
           timer.EndBoundary();
         }
+      } else if (cfg.mode == phasegap::cli::Mode::kOmpTasks) {
+        // Stretch mode: use OpenMP taskloop orchestration while keeping
+        // phase boundaries and timing semantics aligned with baseline.
+#pragma omp parallel shared(mpi_ok)
+        {
+#pragma omp single
+          {
+            timer.BeginInterior();
+#pragma omp taskloop grainsize(256)
+            for (int i = interior_begin; i < interior_end; ++i) {
+              buffers.next[static_cast<std::size_t>(i)] =
+                  UpdatePoint(buffers, i, cfg.kernel, cfg.radius);
+            }
+            timer.EndInterior();
+
+            timer.BeginWait();
+            mpi_ok = CheckMpiSuccess(MPI_Waitall(4, active_reqs, MPI_STATUSES_IGNORE),
+                                     "MPI_Waitall", rank);
+            if (mpi_ok) {
+              ++mpi_wait_calls;
+            }
+            timer.EndWait();
+            timer.EndCommWindow();
+            if (mpi_ok) {
+              phasegap::mpi::UnpackLeftGhost(&buffers, recv_left);
+              phasegap::mpi::UnpackRightGhost(&buffers, recv_right);
+            }
+
+            timer.BeginBoundary();
+#pragma omp taskloop grainsize(256)
+            for (int i = buffers.OwnedBegin(); i < left_boundary_end; ++i) {
+              buffers.next[static_cast<std::size_t>(i)] =
+                  UpdatePoint(buffers, i, cfg.kernel, cfg.radius);
+            }
+#pragma omp taskloop grainsize(256)
+            for (int i = right_boundary_begin; i < buffers.OwnedEnd(); ++i) {
+              buffers.next[static_cast<std::size_t>(i)] =
+                  UpdatePoint(buffers, i, cfg.kernel, cfg.radius);
+            }
+            timer.EndBoundary();
+          }
+        }
       } else {
         double interior_work_us = 0.0;
+        std::atomic<bool> progress_stop{false};
+        std::atomic<bool> progress_completed{false};
+        std::atomic<bool> progress_error{false};
+        std::atomic<int> progress_test_calls{0};
+        std::atomic<int> progress_polls{0};
+        std::atomic<std::uint64_t> progress_poll_us{0};
+        std::thread progress_thread;
+        if (use_progress_thread) {
+          progress_thread = std::thread([&]() {
+            while (!progress_stop.load(std::memory_order_acquire)) {
+              const phasegap::stats::TimePoint poll_start = phasegap::stats::SteadyClock::now();
+              int completed = 0;
+              if (!CheckMpiSuccess(MPI_Testall(4, active_reqs, &completed, MPI_STATUSES_IGNORE),
+                                   "MPI_Testall(progress_thread)", rank)) {
+                progress_error.store(true, std::memory_order_release);
+                progress_completed.store(true, std::memory_order_release);
+                const std::uint64_t us = static_cast<std::uint64_t>(phasegap::stats::DurationMicros(
+                    poll_start, phasegap::stats::SteadyClock::now()));
+                progress_poll_us.fetch_add(us, std::memory_order_relaxed);
+                break;
+              }
+              progress_test_calls.fetch_add(1, std::memory_order_relaxed);
+              progress_polls.fetch_add(1, std::memory_order_relaxed);
+              const std::uint64_t us = static_cast<std::uint64_t>(phasegap::stats::DurationMicros(
+                  poll_start, phasegap::stats::SteadyClock::now()));
+              progress_poll_us.fetch_add(us, std::memory_order_relaxed);
+              if (completed != 0) {
+                progress_completed.store(true, std::memory_order_release);
+                break;
+              }
+            }
+          });
+        }
 #pragma omp parallel
         {
           const int tid = omp_get_thread_num();
@@ -624,11 +717,27 @@ int main(int argc, char** argv) {
 
 #pragma omp master
           {
+            if (use_progress_thread) {
+              progress_stop.store(true, std::memory_order_release);
+              if (progress_thread.joinable()) {
+                progress_thread.join();
+              }
+              mpi_test_calls += progress_test_calls.load(std::memory_order_relaxed);
+              if (progress_completed.load(std::memory_order_acquire)) {
+                polls_to_complete += progress_polls.load(std::memory_order_relaxed);
+              }
+              timer.SetPollMicros(static_cast<double>(progress_poll_us.load(std::memory_order_relaxed)));
+              if (progress_error.load(std::memory_order_acquire)) {
+                mpi_ok = false;
+              }
+            }
             timer.BeginWait();
-            mpi_ok = CheckMpiSuccess(MPI_Waitall(4, active_reqs, MPI_STATUSES_IGNORE),
-                                     "MPI_Waitall", rank);
-            if (mpi_ok) {
-              ++mpi_wait_calls;
+            if (!use_progress_thread || !progress_completed.load(std::memory_order_acquire)) {
+              mpi_ok = mpi_ok && CheckMpiSuccess(MPI_Waitall(4, active_reqs, MPI_STATUSES_IGNORE),
+                                                 "MPI_Waitall", rank);
+              if (mpi_ok) {
+                ++mpi_wait_calls;
+              }
             }
             timer.EndWait();
             timer.EndCommWindow();
@@ -1059,8 +1168,9 @@ int main(int argc, char** argv) {
       summary.polls_to_complete_mean = polls_to_complete_mean_avg;
       summary.polls_to_complete_p95 = polls_to_complete_p95_avg;
       const bool manifest_ok =
-          phasegap::stats::WriteManifest(cfg, summary, provided, transport_selection.effective,
-                                         "manifest");
+          phasegap::stats::WriteManifest(
+              cfg, summary, provided, phasegap::cli::ToString(progress_effective),
+              transport_selection.effective, "manifest");
       if (!manifest_ok) {
         MPI_Finalize();
         return EXIT_FAILURE;
@@ -1074,6 +1184,7 @@ int main(int argc, char** argv) {
       trace_summary.measured_iters = measured_iters;
       trace_summary.trace_iters = trace_window_iters;
       trace_summary.mpi_thread_provided = provided;
+      trace_summary.progress_effective = phasegap::cli::ToString(progress_effective);
       trace_summary.transport_effective = transport_selection.effective;
       trace_summary.t_post_us = t_post_mean_avg;
       trace_summary.t_interior_us = t_interior_mean_avg;
@@ -1154,6 +1265,8 @@ int main(int argc, char** argv) {
               << " | polls_to_complete_p95=" << polls_to_complete_p95_avg
               << " | mpi_thread_requested=" << phasegap::cli::ToString(cfg.mpi_thread)
               << " | mpi_thread_provided=" << provided
+              << " | progress_requested=" << phasegap::cli::ToString(cfg.progress)
+              << " | progress_effective=" << phasegap::cli::ToString(progress_effective)
               << " | transport_requested=" << phasegap::cli::ToString(cfg.transport)
               << " | transport_effective=" << transport_selection.effective
               << '\n';
