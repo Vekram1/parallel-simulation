@@ -67,7 +67,7 @@ validate_sweeps_list() {
   local raw_token token
   IFS=',' read -r -a tokens <<<"${value}"
   for raw_token in "${tokens[@]}"; do
-    token="$(printf '%s' "${raw_token}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    token="$(trim_token "${raw_token}")"
     if [[ -z "${token}" ]]; then
       echo "[matrix] fail: --sweeps entries cannot be empty (got '${value}')" >&2
       exit 2
@@ -80,6 +80,11 @@ validate_sweeps_list() {
         ;;
     esac
   done
+}
+
+trim_token() {
+  local raw="$1"
+  printf '%s' "${raw}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
 usage() {
@@ -467,7 +472,8 @@ echo "[matrix] dry_run=${DRY_RUN} allow_oversub=${ALLOW_OVERSUB}"
 configure_and_build
 
 IFS=',' read -r -a sweep_list <<<"${SWEEPS}"
-for sw in "${sweep_list[@]}"; do
+for raw_sw in "${sweep_list[@]}"; do
+  sw="$(trim_token "${raw_sw}")"
   case "${sw}" in
     1) run_sweep_1 ;;
     2) run_sweep_2 ;;
