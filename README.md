@@ -53,6 +53,18 @@ What the smoke gate enforces:
 - Sanity run completes and prints the PhaseGap summary line
 - Timing/interpretation invariants hold (`t_comm_window_us >= t_wait_us`, nonnegative times, valid overlap range, measured-iteration consistency)
 
+Quality gate scaffold (build + sanity run + artifact/schema checks):
+
+```bash
+scripts/quality_gate.sh --strict-artifacts
+```
+
+Useful options:
+
+```bash
+scripts/quality_gate.sh --build-dir build-gate --run-dir runs/quality-gate --np 2 --threads 2 --n-local 128 --halo 4 --iters 6 --warmup 2 --strict-artifacts
+```
+
 CI gate:
 - GitHub Actions workflow at `.github/workflows/build.yml` runs the same smoke script on Ubuntu with Open MPI.
 - CI also uploads `runs/ci-smoke/smoke.stdout.log` as an artifact for debugging failures.

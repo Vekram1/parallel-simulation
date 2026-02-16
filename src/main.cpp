@@ -244,12 +244,26 @@ int main(int argc, char** argv) {
     if (cfg.mode == phasegap::cli::Mode::kPhaseBlk) {
       timer.BeginCommWindow();
       timer.BeginWait();
-      MPI_Sendrecv(send_left.data(), cfg.halo, MPI_DOUBLE, neighbors.left, 100, recv_right.data(),
-                   cfg.halo, MPI_DOUBLE, neighbors.right, 100, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-      MPI_Sendrecv(send_right.data(), cfg.halo, MPI_DOUBLE, neighbors.right, 101, recv_left.data(),
-                   cfg.halo, MPI_DOUBLE, neighbors.left, 101, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+      bool mpi_ok = true;
+      mpi_ok = mpi_ok && CheckMpiSuccess(
+                           MPI_Sendrecv(send_left.data(), cfg.halo, MPI_DOUBLE, neighbors.left, 100,
+                                        recv_right.data(), cfg.halo, MPI_DOUBLE, neighbors.right, 100,
+                                        MPI_COMM_WORLD, MPI_STATUS_IGNORE),
+                           "MPI_Sendrecv(left->right)", rank);
+      mpi_ok = mpi_ok && CheckMpiSuccess(
+                           MPI_Sendrecv(send_right.data(), cfg.halo, MPI_DOUBLE, neighbors.right,
+                                        101, recv_left.data(), cfg.halo, MPI_DOUBLE, neighbors.left,
+                                        101, MPI_COMM_WORLD, MPI_STATUS_IGNORE),
+                           "MPI_Sendrecv(right->left)", rank);
       timer.EndWait();
       timer.EndCommWindow();
+      if (!mpi_ok) {
+        if (use_persistent_requests) {
+          FreePersistentRequests(persistent_reqs);
+        }
+        MPI_Finalize();
+        return EXIT_FAILURE;
+      }
 
       phasegap::mpi::UnpackLeftGhost(&buffers, recv_left);
       phasegap::mpi::UnpackRightGhost(&buffers, recv_right);
@@ -294,22 +308,38 @@ int main(int argc, char** argv) {
     } else {
       MPI_Request reqs[4] = {MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL};
       MPI_Request* active_reqs = reqs;
+      bool mpi_ok = true;
       timer.BeginCommWindow();
       timer.BeginPost();
       if (use_persistent_requests) {
-        MPI_Startall(4, persistent_reqs);
+        mpi_ok = CheckMpiSuccess(MPI_Startall(4, persistent_reqs), "MPI_Startall", rank);
         active_reqs = persistent_reqs;
       } else {
-        MPI_Irecv(recv_left.data(), cfg.halo, MPI_DOUBLE, neighbors.left, 101, MPI_COMM_WORLD,
-                  &reqs[0]);
-        MPI_Irecv(recv_right.data(), cfg.halo, MPI_DOUBLE, neighbors.right, 100, MPI_COMM_WORLD,
-                  &reqs[1]);
-        MPI_Isend(send_left.data(), cfg.halo, MPI_DOUBLE, neighbors.left, 100, MPI_COMM_WORLD,
-                  &reqs[2]);
-        MPI_Isend(send_right.data(), cfg.halo, MPI_DOUBLE, neighbors.right, 101, MPI_COMM_WORLD,
-                  &reqs[3]);
+        mpi_ok = mpi_ok && CheckMpiSuccess(
+                             MPI_Irecv(recv_left.data(), cfg.halo, MPI_DOUBLE, neighbors.left, 101,
+                                       MPI_COMM_WORLD, &reqs[0]),
+                             "MPI_Irecv(left)", rank);
+        mpi_ok = mpi_ok && CheckMpiSuccess(
+                             MPI_Irecv(recv_right.data(), cfg.halo, MPI_DOUBLE, neighbors.right,
+                                       100, MPI_COMM_WORLD, &reqs[1]),
+                             "MPI_Irecv(right)", rank);
+        mpi_ok = mpi_ok && CheckMpiSuccess(
+                             MPI_Isend(send_left.data(), cfg.halo, MPI_DOUBLE, neighbors.left, 100,
+                                       MPI_COMM_WORLD, &reqs[2]),
+                             "MPI_Isend(left)", rank);
+        mpi_ok = mpi_ok && CheckMpiSuccess(
+                             MPI_Isend(send_right.data(), cfg.halo, MPI_DOUBLE, neighbors.right,
+                                       101, MPI_COMM_WORLD, &reqs[3]),
+                             "MPI_Isend(right)", rank);
       }
       timer.EndPost();
+      if (!mpi_ok) {
+        if (use_persistent_requests) {
+          FreePersistentRequests(persistent_reqs);
+        }
+        MPI_Finalize();
+        return EXIT_FAILURE;
+      }
 
       const int interior_begin = buffers.OwnedBegin() + cfg.boundary_width;
       const int interior_end = buffers.OwnedEnd() - cfg.boundary_width;
@@ -344,7 +374,11 @@ int main(int argc, char** argv) {
                 poll_budget += static_cast<std::uint64_t>(k);
               }
               timer.BeginPoll();
-              MPI_Testall(4, active_reqs, &completed, MPI_STATUSES_IGNORE);
+              if (!CheckMpiSuccess(MPI_Testall(4, active_reqs, &completed, MPI_STATUSES_IGNORE),
+                                   "MPI_Testall", rank)) {
+                mpi_ok = false;
+                completed = 1;
+              }
               ++mpi_test_calls;
               timer.EndPoll();
             }
@@ -358,9 +392,12 @@ int main(int argc, char** argv) {
 #pragma omp master
           {
             timer.BeginWait();
-            if (!completed) {
-              MPI_Waitall(4, active_reqs, MPI_STATUSES_IGNORE);
-              ++mpi_wait_calls;
+            if (!completed && mpi_ok) {
+              mpi_ok = CheckMpiSuccess(MPI_Waitall(4, active_reqs, MPI_STATUSES_IGNORE),
+                                       "MPI_Waitall", rank);
+              if (mpi_ok) {
+                ++mpi_wait_calls;
+              }
             }
             timer.EndWait();
             timer.EndCommWindow();
@@ -406,8 +443,11 @@ int main(int argc, char** argv) {
 #pragma omp master
           {
             timer.BeginWait();
-            MPI_Waitall(4, active_reqs, MPI_STATUSES_IGNORE);
-            ++mpi_wait_calls;
+            mpi_ok = CheckMpiSuccess(MPI_Waitall(4, active_reqs, MPI_STATUSES_IGNORE),
+                                     "MPI_Waitall", rank);
+            if (mpi_ok) {
+              ++mpi_wait_calls;
+            }
             timer.EndWait();
             timer.EndCommWindow();
             phasegap::mpi::UnpackLeftGhost(&buffers, recv_left);
@@ -429,6 +469,13 @@ int main(int argc, char** argv) {
 #pragma omp master
           timer.EndBoundary();
         }
+      }
+      if (!mpi_ok) {
+        if (use_persistent_requests) {
+          FreePersistentRequests(persistent_reqs);
+        }
+        MPI_Finalize();
+        return EXIT_FAILURE;
       }
     }
 
