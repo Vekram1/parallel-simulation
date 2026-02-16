@@ -23,6 +23,97 @@ prompt_default() {
   fi
 }
 
+trim_whitespace() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "${s}"
+}
+
+validate_by_type() {
+  local value="$1"
+  local type="$2"
+  shift 2
+  case "${type}" in
+    pos_int)
+      [[ "${value}" =~ ^[0-9]+$ ]] && (( value > 0 ))
+      return
+      ;;
+    nonneg_int)
+      [[ "${value}" =~ ^[0-9]+$ ]]
+      return
+      ;;
+    bool)
+      case "${value}" in
+        0|1|true|false) return 0 ;;
+      esac
+      return 1
+      ;;
+    enum)
+      local option
+      for option in "$@"; do
+        if [[ "${value}" == "${option}" ]]; then
+          return 0
+        fi
+      done
+      return 1
+      ;;
+    text)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+prompt_value() {
+  local prompt="$1"
+  local default="$2"
+  local required="$3"
+  local type="$4"
+  shift 4
+  local -a options=("$@")
+  local suffix
+  if [[ "${required}" == "1" ]]; then
+    suffix="[${default}]"
+  else
+    if [[ -n "${default}" ]]; then
+      suffix="[${default}, optional]"
+    else
+      suffix="[optional]"
+    fi
+  fi
+
+  while true; do
+    local input
+    read -r -p "${prompt} ${suffix}: " input || true
+    input="$(trim_whitespace "${input}")"
+    if [[ -z "${input}" ]]; then
+      if [[ -n "${default}" ]]; then
+        input="${default}"
+      elif [[ "${required}" == "0" ]]; then
+        printf '%s' ""
+        return
+      else
+        echo "[tui] value required"
+        continue
+      fi
+    fi
+
+    if validate_by_type "${input}" "${type}" "${options[@]-}"; then
+      printf '%s' "${input}"
+      return
+    fi
+
+    if [[ "${type}" == "enum" ]]; then
+      echo "[tui] invalid value '${input}', allowed: ${options[*]}"
+    else
+      echo "[tui] invalid value '${input}' for ${type}"
+    fi
+  done
+}
+
 run_cmd() {
   echo
   echo "[tui] running: $*"
@@ -50,7 +141,8 @@ menu() {
 5) Docker netem smoke (simulated network)
 6) Docker multi-container MPI + netem run
 7) Netem preset list
-8) Exit
+8) PhaseGap custom CLI run (all options)
+9) Exit
 MENU
 }
 
@@ -178,12 +270,121 @@ docker_mpi_compose_flow() {
   fi
 }
 
+custom_phasegap_flow() {
+  require_cmd mpirun
+  local phasegap_bin mode ranks threads n_local halo iters warmup
+  local kernel radius timesteps poll_every mpi_thread progress omp_schedule omp_chunk
+  local omp_bind omp_places flops_per_point bytes_per_point check check_every poison_ghost
+  local sync trace trace_iters trace_detail transport out_dir run_id csv csv_mode manifest
+  local effective_kernel effective_radius effective_timesteps
+  local -a cmd
+
+  phasegap_bin="$(prompt_value "PhaseGap binary path" "${ROOT_DIR}/build/phasegap" "1" "text")"
+  if [[ ! -x "${phasegap_bin}" ]]; then
+    echo "[tui] fail: binary is not executable: ${phasegap_bin}"
+    return
+  fi
+
+  mode="$(prompt_value "Mode" "phase_nb" "1" "enum" \
+    phase_nb phase_blk nb_test phase_persist omp_tasks)"
+  ranks="$(prompt_value "MPI ranks" "2" "1" "pos_int")"
+  threads="$(prompt_value "OMP threads" "2" "1" "pos_int")"
+  n_local="$(prompt_value "N local (--N)" "256" "1" "pos_int")"
+  halo="$(prompt_value "Halo (--halo)" "8" "1" "pos_int")"
+  iters="$(prompt_value "Iters (--iters)" "8" "1" "pos_int")"
+  warmup="$(prompt_value "Warmup (--warmup)" "2" "1" "nonneg_int")"
+  if (( warmup >= iters )); then
+    echo "[tui] fail: warmup must be less than iters (got warmup=${warmup}, iters=${iters})"
+    return
+  fi
+
+  kernel="$(prompt_value "Kernel" "" "0" "enum" stencil3 stencil5 axpy)"
+  radius="$(prompt_value "Radius (--radius)" "" "0" "pos_int")"
+  timesteps="$(prompt_value "Timesteps (--timesteps)" "" "0" "pos_int")"
+  poll_every="$(prompt_value "Poll every (--poll_every)" "" "0" "pos_int")"
+  mpi_thread="$(prompt_value "MPI thread level" "" "0" "enum" funneled serialized multiple)"
+  progress="$(prompt_value "Progress mode" "" "0" "enum" inline_poll progress_thread)"
+  omp_schedule="$(prompt_value "OMP schedule" "" "0" "enum" static dynamic guided)"
+  omp_chunk="$(prompt_value "OMP chunk (--omp_chunk)" "" "0" "nonneg_int")"
+  omp_bind="$(prompt_value "OMP bind (--omp_bind)" "" "0" "bool")"
+  omp_places="$(prompt_value "OMP places (--omp_places)" "" "0" "enum" cores threads)"
+  flops_per_point="$(prompt_value "Flops per point" "" "0" "nonneg_int")"
+  bytes_per_point="$(prompt_value "Bytes per point" "" "0" "nonneg_int")"
+  check="$(prompt_value "Check correctness (--check)" "" "0" "bool")"
+  check_every="$(prompt_value "Check every (--check_every)" "" "0" "pos_int")"
+  poison_ghost="$(prompt_value "Poison ghost (--poison_ghost)" "" "0" "bool")"
+  sync="$(prompt_value "Sync mode (--sync)" "" "0" "enum" none barrier_start barrier_each)"
+  trace="$(prompt_value "Trace (--trace)" "" "0" "bool")"
+  trace_iters="$(prompt_value "Trace iters (--trace_iters)" "" "0" "pos_int")"
+  trace_detail="$(prompt_value "Trace detail (--trace_detail)" "" "0" "enum" rank thread)"
+  transport="$(prompt_value "Transport (--transport)" "" "0" "enum" auto shm tcp)"
+  out_dir="$(prompt_value "Output dir (--out_dir)" "" "0" "text")"
+  run_id="$(prompt_value "Run id (--run_id)" "" "0" "text")"
+  csv="$(prompt_value "CSV path (--csv)" "" "0" "text")"
+  csv_mode="$(prompt_value "CSV mode (--csv_mode)" "" "0" "enum" write append)"
+  manifest="$(prompt_value "Manifest (--manifest)" "" "0" "bool")"
+
+  effective_kernel="${kernel:-stencil3}"
+  if [[ -n "${radius}" ]]; then
+    effective_radius="${radius}"
+  else
+    case "${effective_kernel}" in
+      stencil5) effective_radius="2" ;;
+      *) effective_radius="1" ;;
+    esac
+  fi
+  effective_timesteps="${timesteps:-1}"
+  if (( halo < effective_radius * effective_timesteps )); then
+    echo "[tui] fail: invalid halo configuration in TUI pre-check: require halo >= radius*timesteps"
+    echo "[tui] details: halo=${halo}, radius=${effective_radius}, timesteps=${effective_timesteps}"
+    return
+  fi
+
+  cmd=(
+    "${phasegap_bin}"
+    --mode "${mode}"
+    --ranks "${ranks}"
+    --threads "${threads}"
+    --N "${n_local}"
+    --halo "${halo}"
+    --iters "${iters}"
+    --warmup "${warmup}"
+  )
+  [[ -n "${kernel}" ]] && cmd+=(--kernel "${kernel}")
+  [[ -n "${radius}" ]] && cmd+=(--radius "${radius}")
+  [[ -n "${timesteps}" ]] && cmd+=(--timesteps "${timesteps}")
+  [[ -n "${poll_every}" ]] && cmd+=(--poll_every "${poll_every}")
+  [[ -n "${mpi_thread}" ]] && cmd+=(--mpi_thread "${mpi_thread}")
+  [[ -n "${progress}" ]] && cmd+=(--progress "${progress}")
+  [[ -n "${omp_schedule}" ]] && cmd+=(--omp_schedule "${omp_schedule}")
+  [[ -n "${omp_chunk}" ]] && cmd+=(--omp_chunk "${omp_chunk}")
+  [[ -n "${omp_bind}" ]] && cmd+=(--omp_bind "${omp_bind}")
+  [[ -n "${omp_places}" ]] && cmd+=(--omp_places "${omp_places}")
+  [[ -n "${flops_per_point}" ]] && cmd+=(--flops_per_point "${flops_per_point}")
+  [[ -n "${bytes_per_point}" ]] && cmd+=(--bytes_per_point "${bytes_per_point}")
+  [[ -n "${check}" ]] && cmd+=(--check "${check}")
+  [[ -n "${check_every}" ]] && cmd+=(--check_every "${check_every}")
+  [[ -n "${poison_ghost}" ]] && cmd+=(--poison_ghost "${poison_ghost}")
+  [[ -n "${sync}" ]] && cmd+=(--sync "${sync}")
+  [[ -n "${trace}" ]] && cmd+=(--trace "${trace}")
+  [[ -n "${trace_iters}" ]] && cmd+=(--trace_iters "${trace_iters}")
+  [[ -n "${trace_detail}" ]] && cmd+=(--trace_detail "${trace_detail}")
+  [[ -n "${transport}" ]] && cmd+=(--transport "${transport}")
+  [[ -n "${out_dir}" ]] && cmd+=(--out_dir "${out_dir}")
+  [[ -n "${run_id}" ]] && cmd+=(--run_id "${run_id}")
+  [[ -n "${csv}" ]] && cmd+=(--csv "${csv}")
+  [[ -n "${csv_mode}" ]] && cmd+=(--csv_mode "${csv_mode}")
+  [[ -n "${manifest}" ]] && cmd+=(--manifest "${manifest}")
+
+  run_cmd env OMP_NUM_THREADS="${threads}" mpirun -np "${ranks}" "${cmd[@]}"
+}
+
 main() {
   require_cmd bash
   show_header
   while true; do
     menu
-    read -r -p "Select action [1-8]: " choice || true
+    read -r -p "Select action [1-9]: " choice || true
     case "${choice:-}" in
       1) smoke_flow ;;
       2) quality_gate_flow ;;
@@ -192,7 +393,8 @@ main() {
       5) docker_netem_flow ;;
       6) docker_mpi_compose_flow ;;
       7) run_cmd "${ROOT_DIR}/scripts/netem_on.sh" --list-presets ;;
-      8)
+      8) custom_phasegap_flow ;;
+      9)
         echo "[tui] bye"
         exit 0
         ;;
