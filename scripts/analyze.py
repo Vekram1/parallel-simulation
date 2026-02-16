@@ -157,7 +157,11 @@ def discover_rows(inputs: List[Path]) -> List[Dict[str, object]]:
 
 
 def apply_filters(
-    rows: List[Dict[str, object]], mode_filter: Optional[List[str]], halo_filter: Optional[List[int]]
+    rows: List[Dict[str, object]],
+    mode_filter: Optional[List[str]],
+    halo_filter: Optional[List[int]],
+    flops_filter: Optional[List[int]],
+    bytes_filter: Optional[List[int]],
 ) -> List[Dict[str, object]]:
     filtered = rows
     if mode_filter:
@@ -166,6 +170,12 @@ def apply_filters(
     if halo_filter:
         halos = set(halo_filter)
         filtered = [r for r in filtered if int(r["halo"]) in halos]
+    if flops_filter:
+        allowed = set(flops_filter)
+        filtered = [r for r in filtered if int(r["flops_per_point"]) in allowed]
+    if bytes_filter:
+        allowed = set(bytes_filter)
+        filtered = [r for r in filtered if int(r["bytes_per_point"]) in allowed]
     return filtered
 
 
@@ -190,49 +200,94 @@ def _aggregate_by_thread(rows: List[Dict[str, object]], metric: str) -> Dict[str
 
 
 def write_metric_summary(rows: List[Dict[str, object]], out_path: Path) -> None:
-    grouped: Dict[Tuple[str, int, int], List[Dict[str, object]]] = defaultdict(list)
+    grouped: Dict[Tuple[str, int, int, int, int], List[Dict[str, object]]] = defaultdict(list)
     for row in rows:
-        grouped[(str(row["mode"]), int(row["halo"]), int(row["threads"]))].append(row)
+        grouped[
+            (
+                str(row["mode"]),
+                int(row["halo"]),
+                int(row["flops_per_point"]),
+                int(row["bytes_per_point"]),
+                int(row["threads"]),
+            )
+        ].append(row)
 
     with out_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["mode", "halo", "threads", "wait_frac", "overlap_ratio", "wait_skew", "samples"])
+        writer.writerow(
+            [
+                "mode",
+                "halo",
+                "flops_per_point",
+                "bytes_per_point",
+                "threads",
+                "wait_frac",
+                "overlap_ratio",
+                "wait_skew",
+                "samples",
+            ]
+        )
         for key in sorted(grouped.keys()):
             samples = grouped[key]
             wait_frac = sum(float(r["wait_frac"]) for r in samples) / len(samples)
             overlap_ratio = sum(float(r["overlap_ratio"]) for r in samples) / len(samples)
             wait_skew = sum(float(r["wait_skew"]) for r in samples) / len(samples)
             writer.writerow(
-                [key[0], key[1], key[2], f"{wait_frac:.8f}", f"{overlap_ratio:.8f}", f"{wait_skew:.8f}", len(samples)]
+                [
+                    key[0],
+                    key[1],
+                    key[2],
+                    key[3],
+                    key[4],
+                    f"{wait_frac:.8f}",
+                    f"{overlap_ratio:.8f}",
+                    f"{wait_skew:.8f}",
+                    len(samples),
+                ]
             )
 
 
 def plot_metric(rows: List[Dict[str, object]], metric: str, title: str, ylabel: str, out_path: Path) -> bool:
     if not HAS_MATPLOTLIB:
         return False
-    halos = sorted({int(r["halo"]) for r in rows})
-    if not halos:
+    facets = sorted(
+        {
+            (
+                int(r["halo"]),
+                int(r["flops_per_point"]),
+                int(r["bytes_per_point"]),
+            )
+            for r in rows
+        }
+    )
+    if not facets:
         return False
-    ncols = min(3, len(halos))
-    nrows = (len(halos) + ncols - 1) // ncols
+    ncols = min(3, len(facets))
+    nrows = (len(facets) + ncols - 1) // ncols
     fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(5 * ncols, 3.5 * nrows), squeeze=False)
 
-    for idx, halo in enumerate(halos):
+    for idx, (halo, flops_per_point, bytes_per_point) in enumerate(facets):
         ax = axes[idx // ncols][idx % ncols]
-        halo_rows = [r for r in rows if int(r["halo"]) == halo]
-        series = _aggregate_by_thread(halo_rows, metric)
+        facet_rows = [
+            r
+            for r in rows
+            if int(r["halo"]) == halo
+            and int(r["flops_per_point"]) == flops_per_point
+            and int(r["bytes_per_point"]) == bytes_per_point
+        ]
+        series = _aggregate_by_thread(facet_rows, metric)
         for mode in sorted(series.keys()):
             xs = [p[0] for p in series[mode]]
             ys = [p[1] for p in series[mode]]
             ax.plot(xs, ys, marker="o", label=mode)
-        ax.set_title(f"H={halo}")
+        ax.set_title(f"H={halo} f={flops_per_point} b={bytes_per_point}")
         ax.set_xlabel("threads")
         ax.set_ylabel(ylabel)
         ax.grid(True, alpha=0.3)
         if series:
             ax.legend(fontsize=8)
 
-    for idx in range(len(halos), nrows * ncols):
+    for idx in range(len(facets), nrows * ncols):
         axes[idx // ncols][idx % ncols].axis("off")
 
     fig.suptitle(title)
@@ -281,6 +336,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", action="append", help="Filter mode(s), e.g. --mode phase_nb")
     parser.add_argument("--halo", action="append", type=int, help="Filter halo widths, e.g. --halo 256")
     parser.add_argument(
+        "--flops-per-point",
+        action="append",
+        type=int,
+        help="Filter flops_per_point values, e.g. --flops-per-point 64",
+    )
+    parser.add_argument(
+        "--bytes-per-point",
+        action="append",
+        type=int,
+        help="Filter bytes_per_point values, e.g. --bytes-per-point 0",
+    )
+    parser.add_argument(
         "--max-trace-suggestions",
         type=int,
         default=3,
@@ -293,7 +360,7 @@ def main() -> int:
     args = parse_args()
     input_paths = [Path(p).resolve() for p in args.input]
     rows = discover_rows(input_paths)
-    rows = apply_filters(rows, args.mode, args.halo)
+    rows = apply_filters(rows, args.mode, args.halo, args.flops_per_point, args.bytes_per_point)
     if not rows:
         print("[analyze] fail: no usable rows found after loading/filtering", file=sys.stderr)
         return 1
@@ -304,21 +371,21 @@ def main() -> int:
     wrote_wait = plot_metric(
         rows,
         metric="wait_frac",
-        title="wait_frac vs threads (faceted by halo)",
+        title="wait_frac vs threads (faceted by halo + intensity)",
         ylabel="wait_frac",
         out_path=out_dir / "wait_frac_vs_threads.png",
     )
     wrote_overlap = plot_metric(
         rows,
         metric="overlap_ratio",
-        title="overlap_ratio vs threads (faceted by halo)",
+        title="overlap_ratio vs threads (faceted by halo + intensity)",
         ylabel="overlap_ratio",
         out_path=out_dir / "overlap_ratio_vs_threads.png",
     )
     wrote_skew = plot_metric(
         rows,
         metric="wait_skew",
-        title="wait_skew vs threads (faceted by halo)",
+        title="wait_skew vs threads (faceted by halo + intensity)",
         ylabel="wait_skew",
         out_path=out_dir / "wait_skew_vs_threads.png",
     )

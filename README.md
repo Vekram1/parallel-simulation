@@ -128,6 +128,59 @@ Index/catalog policy:
 - `results/results.csv` (when produced by matrix harness) is a non-authoritative run catalog for convenience.
 - Per-run artifacts under `runs/...` remain the source of truth for provenance/debugging.
 
+## Results Interpretation Guide
+
+Use this section to turn CSV and trace outputs into quick diagnoses.
+
+Core metric meanings:
+- `wait_frac`: fraction of iteration time spent in exposed wait.
+  - Higher values indicate coordination pressure or communication delay.
+- `overlap_ratio`: how much communication time was hidden by interior compute.
+  - `1.0` means near-ideal hiding, `0.0` means little or no overlap.
+- `wait_skew`: cross-rank imbalance indicator (`wait_mean_max / wait_mean_avg`).
+  - Near `1.0` is balanced; higher values indicate one or more straggler ranks.
+- `mpi_test_calls` and `polls_to_complete_*` (for `nb_test`):
+  - Higher polling counts can indicate completion latency, but can also reflect too-aggressive polling cadence.
+
+Expected signatures by mode:
+- `phase_blk`:
+  - `overlap_ratio` should be near zero (baseline no-overlap behavior).
+  - `t_wait_us` usually tracks most of the communication window.
+- `phase_nb`:
+  - should generally improve overlap relative to `phase_blk` when interior work is nontrivial.
+  - if `overlap_ratio` remains near zero, communication may be effectively serialized or interior is too small.
+- `nb_test`:
+  - compare against `phase_nb` to see whether polling cadence helps completion timing.
+  - check `mpi_test_calls` and `polls_to_complete_p95` for progress cost/completion behavior.
+- `phase_persist`:
+  - intended to reduce request setup overhead in steady state.
+  - compare `t_post_us` and `t_iter_us` against `phase_nb` under same `(P,T,N,H)` settings.
+
+Thread-scaling interpretation (fixed ranks and halo):
+- If threads increase and `t_interior_us` drops while `t_wait_us`/`wait_frac` rises, coordination is becoming dominant.
+- If both `t_interior_us` and `t_wait_us` drop, communication likely still scales with compute regime.
+- Use `wait_skew` to distinguish global slowdown from rank-local imbalance.
+
+Trace reading patterns (`trace.json`):
+- Healthy overlap:
+  - interior spans overlap communication window and wait spans stay short.
+- Coordination bottleneck:
+  - short interior spans followed by visibly long wait spans.
+- Imbalance:
+  - one rank shows longer waits or delayed boundary start relative to others.
+- Polling-heavy behavior (`nb_test`):
+  - elevated `mpi_test_calls` counters with minimal wait reduction suggests poll cadence tuning is needed.
+
+Common anomaly diagnostics:
+- `wait_frac` unexpectedly negative or `overlap_ratio` outside `[0,1]`:
+  - indicates metric pipeline drift; run `scripts/check_metrics.py` and quality gate.
+- `phase_blk` shows high overlap:
+  - likely orchestration semantics drift; verify blocking path ordering.
+- very high `wait_skew` with modest mean wait:
+  - likely rank outlier/noise; check affinity, per-rank trace lanes, and host contention.
+- large run-to-run variation:
+  - stabilize `OMP_PROC_BIND`/`OMP_PLACES`, avoid oversubscription (`P*T <= C`), and re-run with warmup.
+
 ## Matrix Harness
 
 Sweep automation:
