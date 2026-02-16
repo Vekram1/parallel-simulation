@@ -19,6 +19,12 @@ RUN_START_MARKER="${LOG_DIR}/run.start.marker"
 CSV_PATH="${RUN_DIR}/results.csv"
 MANIFEST_PATH="${RUN_DIR}/manifest.json"
 TRACE_PATH="${RUN_DIR}/trace.json"
+PHASE_BLK_DIR="${RUN_DIR}/phase-blk-acceptance"
+PHASE_NB_T1_DIR="${RUN_DIR}/phase-nb-t1-acceptance"
+PHASE_NB_T2_DIR="${RUN_DIR}/phase-nb-t2-acceptance"
+PHASE_BLK_LOG="${LOG_DIR}/phase-blk-acceptance.stdout.log"
+PHASE_NB_T1_LOG="${LOG_DIR}/phase-nb-t1-acceptance.stdout.log"
+PHASE_NB_T2_LOG="${LOG_DIR}/phase-nb-t2-acceptance.stdout.log"
 GENERATOR=""
 NP=2
 THREADS=1
@@ -28,13 +34,88 @@ ITERS=4
 WARMUP=1
 
 STRICT_ARTIFACTS=0
+SKIP_BUILD=0
 
 require_option_value() {
   local opt="$1"
   if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* ]]; then
     echo "missing value for ${opt}" >&2
-    echo "usage: scripts/quality_gate.sh [--strict-artifacts] [--build-dir DIR] [--run-dir DIR] [--generator NAME] [--np P] [--threads T] [--n-local N] [--halo H] [--iters K] [--warmup W]" >&2
+    echo "usage: scripts/quality_gate.sh [--strict-artifacts] [--skip-build] [--build-dir DIR] [--run-dir DIR] [--generator NAME] [--np P] [--threads T] [--n-local N] [--halo H] [--iters K] [--warmup W]" >&2
     exit 2
+  fi
+}
+
+float_le() {
+  local value="$1"
+  local bound="$2"
+  python3 - "$value" "$bound" <<'PY'
+import sys
+v = float(sys.argv[1])
+b = float(sys.argv[2])
+sys.exit(0 if v <= b else 1)
+PY
+}
+
+float_ge() {
+  local value="$1"
+  local bound="$2"
+  python3 - "$value" "$bound" <<'PY'
+import sys
+v = float(sys.argv[1])
+b = float(sys.argv[2])
+sys.exit(0 if v >= b else 1)
+PY
+}
+
+run_case() {
+  local mode="$1"
+  local threads="$2"
+  local out_dir="$3"
+  local csv_path="$4"
+  local stdout_log="$5"
+  local trace_flag="$6"
+
+  mkdir -p "${out_dir}"
+  : >"${stdout_log}"
+  local run_cmd=()
+  if [[ "${NP}" -eq 1 ]]; then
+    run_cmd=(
+      "${BUILD_DIR}/phasegap"
+      --mode "${mode}"
+      --ranks "${NP}"
+      --threads "${threads}"
+      --N "${N_LOCAL}"
+      --halo "${HALO}"
+      --iters "${ITERS}"
+      --warmup "${WARMUP}"
+      --trace "${trace_flag}"
+      --trace_iters 2
+      --out_dir "${out_dir}"
+      --csv "${csv_path}"
+      --manifest 1
+    )
+  else
+    run_cmd=(
+      mpirun -np "${NP}" "${BUILD_DIR}/phasegap"
+      --mode "${mode}"
+      --ranks "${NP}"
+      --threads "${threads}"
+      --N "${N_LOCAL}"
+      --halo "${HALO}"
+      --iters "${ITERS}"
+      --warmup "${WARMUP}"
+      --trace "${trace_flag}"
+      --trace_iters 2
+      --out_dir "${out_dir}"
+      --csv "${csv_path}"
+      --manifest 1
+    )
+  fi
+
+  if ! OMP_NUM_THREADS="${threads}" "${run_cmd[@]}" >"${stdout_log}" 2>&1; then
+    echo "[gate] fail: ${mode} run failed (threads=${threads})" >&2
+    cat "${stdout_log}" >&2
+    exit 1
   fi
 }
 
@@ -42,6 +123,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --strict-artifacts)
       STRICT_ARTIFACTS=1
+      shift
+      ;;
+    --skip-build)
+      SKIP_BUILD=1
       shift
       ;;
     --build-dir)
@@ -97,7 +182,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "unknown option: $1" >&2
-      echo "usage: scripts/quality_gate.sh [--strict-artifacts] [--build-dir DIR] [--run-dir DIR] [--generator NAME] [--np P] [--threads T] [--n-local N] [--halo H] [--iters K] [--warmup W]" >&2
+      echo "usage: scripts/quality_gate.sh [--strict-artifacts] [--skip-build] [--build-dir DIR] [--run-dir DIR] [--generator NAME] [--np P] [--threads T] [--n-local N] [--halo H] [--iters K] [--warmup W]" >&2
       exit 2
       ;;
   esac
@@ -277,9 +362,11 @@ if ! command -v cmake >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v mpirun >/dev/null 2>&1; then
-  echo "[gate] fail: mpirun not found in PATH" >&2
-  exit 1
+if [[ "${NP}" -gt 1 ]]; then
+  if ! command -v mpirun >/dev/null 2>&1; then
+    echo "[gate] fail: mpirun not found in PATH (required when --np > 1)" >&2
+    exit 1
+  fi
 fi
 
 require_rg
@@ -290,25 +377,29 @@ if (( ITERS <= WARMUP )); then
   exit 1
 fi
 
-echo "[gate] configure/build args: build_dir=${BUILD_DIR} run_dir=${RUN_DIR} np=${NP} threads=${THREADS} n_local=${N_LOCAL} halo=${HALO} iters=${ITERS} warmup=${WARMUP}"
+echo "[gate] configure/build args: build_dir=${BUILD_DIR} run_dir=${RUN_DIR} np=${NP} threads=${THREADS} n_local=${N_LOCAL} halo=${HALO} iters=${ITERS} warmup=${WARMUP} skip_build=${SKIP_BUILD}"
 
-echo "[gate] configure"
-if [[ -n "${GENERATOR}" ]]; then
-  CMAKE_CONFIGURE_CMD=(cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Release -G "${GENERATOR}")
+if [[ ${SKIP_BUILD} -eq 0 ]]; then
+  echo "[gate] configure"
+  if [[ -n "${GENERATOR}" ]]; then
+    CMAKE_CONFIGURE_CMD=(cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Release -G "${GENERATOR}")
+  else
+    CMAKE_CONFIGURE_CMD=(cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Release)
+  fi
+  if ! "${CMAKE_CONFIGURE_CMD[@]}"; then
+    echo "[gate] fail: configure failed (likely missing MPI/OpenMP toolchain in this environment)" >&2
+    echo "[gate] hint: if you see 'ld: library System not found' on macOS, run xcode-select --install and verify SDK tools in your shell." >&2
+    echo "[gate] hint: if OpenMP is missing, use scripts/dev/configure-macos-openmp.sh for the build dir." >&2
+    exit 1
+  fi
+
+  echo "[gate] build"
+  if ! cmake --build "${BUILD_DIR}"; then
+    echo "[gate] fail: build failed" >&2
+    exit 1
+  fi
 else
-  CMAKE_CONFIGURE_CMD=(cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Release)
-fi
-if ! "${CMAKE_CONFIGURE_CMD[@]}"; then
-  echo "[gate] fail: configure failed (likely missing MPI/OpenMP toolchain in this environment)" >&2
-  echo "[gate] hint: if you see 'ld: library System not found' on macOS, run xcode-select --install and verify SDK tools in your shell." >&2
-  echo "[gate] hint: if OpenMP is missing, use scripts/dev/configure-macos-openmp.sh for the build dir." >&2
-  exit 1
-fi
-
-echo "[gate] build"
-if ! cmake --build "${BUILD_DIR}"; then
-  echo "[gate] fail: build failed" >&2
-  exit 1
+  echo "[gate] skip-build enabled; using existing executable in ${BUILD_DIR}"
 fi
 
 if [[ ! -x "${BUILD_DIR}/phasegap" ]]; then
@@ -317,26 +408,8 @@ if [[ ! -x "${BUILD_DIR}/phasegap" ]]; then
 fi
 
 echo "[gate] sanity run"
-: >"${STDOUT_LOG}"
 : >"${RUN_START_MARKER}"
-if ! OMP_NUM_THREADS="${THREADS}" mpirun -np "${NP}" "${BUILD_DIR}/phasegap" \
-  --mode phase_nb \
-  --ranks "${NP}" \
-  --threads "${THREADS}" \
-  --N "${N_LOCAL}" \
-  --halo "${HALO}" \
-  --iters "${ITERS}" \
-  --warmup "${WARMUP}" \
-  --trace 1 \
-  --trace_iters 2 \
-  --out_dir "${RUN_DIR}" \
-  --csv "${RUN_DIR}/results.csv" \
-  --manifest 1 \
-  >"${STDOUT_LOG}" 2>&1; then
-  echo "[gate] fail: sanity run failed" >&2
-  cat "${STDOUT_LOG}" >&2
-  exit 1
-fi
+run_case "phase_nb" "${THREADS}" "${RUN_DIR}" "${RUN_DIR}/results.csv" "${STDOUT_LOG}" 1
 
 if ! rg -q "phasegap skeleton ready" "${STDOUT_LOG}"; then
   echo "[gate] fail: sanity output missing run summary" >&2
@@ -354,6 +427,42 @@ done
 
 if ! python3 "${ROOT_DIR}/scripts/check_metrics.py" --log "${STDOUT_LOG}" --expect-measured-iters "$((ITERS - WARMUP))"; then
   echo "[gate] fail: metrics checker reported invariant violation" >&2
+  exit 1
+fi
+
+echo "[gate] acceptance run: phase_blk no-overlap baseline"
+run_case "phase_blk" "${THREADS}" "${PHASE_BLK_DIR}" "${PHASE_BLK_DIR}/results.csv" "${PHASE_BLK_LOG}" 0
+if ! python3 "${ROOT_DIR}/scripts/check_metrics.py" --log "${PHASE_BLK_LOG}" --expect-measured-iters "$((ITERS - WARMUP))"; then
+  echo "[gate] fail: phase_blk metrics checker reported invariant violation" >&2
+  exit 1
+fi
+blk_overlap="$(csv_last_field_by_name "${PHASE_BLK_DIR}/results.csv" "overlap_ratio")"
+if ! float_le "${blk_overlap}" "0.05"; then
+  echo "[gate] fail: phase_blk overlap_ratio too high for no-overlap baseline (got ${blk_overlap}, max 0.05)" >&2
+  exit 1
+fi
+
+echo "[gate] acceptance run: phase_nb thread-scaling visibility check"
+run_case "phase_nb" "1" "${PHASE_NB_T1_DIR}" "${PHASE_NB_T1_DIR}/results.csv" "${PHASE_NB_T1_LOG}" 0
+run_case "phase_nb" "2" "${PHASE_NB_T2_DIR}" "${PHASE_NB_T2_DIR}/results.csv" "${PHASE_NB_T2_LOG}" 0
+if ! python3 "${ROOT_DIR}/scripts/check_metrics.py" --log "${PHASE_NB_T1_LOG}" --expect-measured-iters "$((ITERS - WARMUP))"; then
+  echo "[gate] fail: phase_nb T=1 metrics checker reported invariant violation" >&2
+  exit 1
+fi
+if ! python3 "${ROOT_DIR}/scripts/check_metrics.py" --log "${PHASE_NB_T2_LOG}" --expect-measured-iters "$((ITERS - WARMUP))"; then
+  echo "[gate] fail: phase_nb T=2 metrics checker reported invariant violation" >&2
+  exit 1
+fi
+nb_wait_t1="$(csv_last_field_by_name "${PHASE_NB_T1_DIR}/results.csv" "wait_frac")"
+nb_wait_t2="$(csv_last_field_by_name "${PHASE_NB_T2_DIR}/results.csv" "wait_frac")"
+# Visibility check with tolerance to reduce false negatives on noisy hosts.
+if ! float_ge "${nb_wait_t2}" "$(python3 - "${nb_wait_t1}" <<'PY'
+import sys
+w1 = float(sys.argv[1])
+print(w1 - 0.02)
+PY
+)"; then
+  echo "[gate] fail: phase_nb wait_frac did not increase/stay comparable when threads rose (T1=${nb_wait_t1}, T2=${nb_wait_t2})" >&2
   exit 1
 fi
 
