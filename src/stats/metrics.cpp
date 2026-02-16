@@ -1,6 +1,8 @@
 #include "phasegap/stats/metrics.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <cmath>
 
 namespace phasegap::stats {
 
@@ -40,5 +42,27 @@ BandwidthMetrics ComputeBandwidthMetrics(int halo_elems, std::size_t element_siz
   return metrics;
 }
 
-}  // namespace phasegap::stats
+double Percentile(std::vector<double> values, double q) {
+  if (values.empty()) {
+    return 0.0;
+  }
+  const double clamped_q = std::clamp(q, 0.0, 1.0);
+  const double rank = clamped_q * static_cast<double>(values.size() - 1);
+  const auto lower_idx = static_cast<std::size_t>(std::floor(rank));
+  const auto upper_idx = static_cast<std::size_t>(std::ceil(rank));
 
+  std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(lower_idx),
+                   values.end());
+  const double lower = values[lower_idx];
+  if (upper_idx == lower_idx) {
+    return lower;
+  }
+
+  std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(upper_idx),
+                   values.end());
+  const double upper = values[upper_idx];
+  const double weight = rank - static_cast<double>(lower_idx);
+  return lower + weight * (upper - lower);
+}
+
+}  // namespace phasegap::stats

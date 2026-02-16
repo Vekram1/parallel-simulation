@@ -88,8 +88,14 @@ bool WriteCsvRow(const cli::Config& cfg, const CsvSummary& summary, const char* 
     out << "schema_version,timestamp,run_id,mode,kernel,mpi_thread_requested,mpi_thread_provided"
         << ",ranks,omp_threads,measured_iters,N,H,radius,timesteps,B,iters,warmup,poll_every"
         << ",t_iter_us,t_post_us,t_interior_us,t_wait_us,t_boundary_us,t_poll_us,t_comm_window_us"
+        << ",t_iter_mean_max_us,t_post_mean_max_us,t_interior_mean_max_us,t_wait_mean_max_us"
+        << ",t_boundary_mean_max_us,t_poll_mean_max_us,t_comm_window_mean_max_us"
+        << ",t_iter_p50_us,t_iter_p95_us,t_post_p50_us,t_post_p95_us,t_interior_p50_us"
+        << ",t_interior_p95_us,t_wait_p50_us,t_wait_p95_us,t_boundary_p50_us,t_boundary_p95_us"
+        << ",t_poll_p50_us,t_poll_p95_us,t_comm_window_p50_us,t_comm_window_p95_us"
         << ",wait_frac,wait_skew,overlap_ratio,checksum64,msg_bytes,bytes_total"
-        << ",bw_effective_bytes_per_us,mpi_test_calls,mpi_wait_calls\n";
+        << ",bw_effective_bytes_per_us,mpi_test_calls,mpi_wait_calls,polls_to_complete_mean"
+        << ",polls_to_complete_p95\n";
   }
 
   const std::vector<std::string> fields = {
@@ -118,6 +124,27 @@ bool WriteCsvRow(const cli::Config& cfg, const CsvSummary& summary, const char* 
       std::to_string(summary.t_boundary_us),
       std::to_string(summary.t_poll_us),
       std::to_string(summary.t_comm_window_us),
+      std::to_string(summary.t_iter_mean_max_us),
+      std::to_string(summary.t_post_mean_max_us),
+      std::to_string(summary.t_interior_mean_max_us),
+      std::to_string(summary.t_wait_mean_max_us),
+      std::to_string(summary.t_boundary_mean_max_us),
+      std::to_string(summary.t_poll_mean_max_us),
+      std::to_string(summary.t_comm_window_mean_max_us),
+      std::to_string(summary.t_iter_p50_us),
+      std::to_string(summary.t_iter_p95_us),
+      std::to_string(summary.t_post_p50_us),
+      std::to_string(summary.t_post_p95_us),
+      std::to_string(summary.t_interior_p50_us),
+      std::to_string(summary.t_interior_p95_us),
+      std::to_string(summary.t_wait_p50_us),
+      std::to_string(summary.t_wait_p95_us),
+      std::to_string(summary.t_boundary_p50_us),
+      std::to_string(summary.t_boundary_p95_us),
+      std::to_string(summary.t_poll_p50_us),
+      std::to_string(summary.t_poll_p95_us),
+      std::to_string(summary.t_comm_window_p50_us),
+      std::to_string(summary.t_comm_window_p95_us),
       std::to_string(summary.wait_frac),
       std::to_string(summary.wait_skew),
       std::to_string(summary.overlap_ratio),
@@ -127,6 +154,8 @@ bool WriteCsvRow(const cli::Config& cfg, const CsvSummary& summary, const char* 
       std::to_string(summary.bw_effective_bytes_per_us),
       std::to_string(summary.mpi_test_calls),
       std::to_string(summary.mpi_wait_calls),
+      std::to_string(summary.polls_to_complete_mean),
+      std::to_string(summary.polls_to_complete_p95),
   };
 
   for (std::size_t i = 0; i < fields.size(); ++i) {

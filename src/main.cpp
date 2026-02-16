@@ -68,6 +68,46 @@ bool CheckMpiSuccess(int code, const char* op, int rank) {
   return false;
 }
 
+bool EnvIsUnsetOrEmpty(const char* key) {
+  const char* val = std::getenv(key);
+  return val == nullptr || val[0] == '\0';
+}
+
+void EmitRuntimeWarnings(const phasegap::cli::Config& cfg, int world_size, int rank) {
+  if (rank != 0) {
+    return;
+  }
+
+  if (!cfg.manifest) {
+    std::cerr << "Warning: --manifest=0 disables reproducibility metadata capture for this run\n";
+  }
+
+  const int requested_workers = world_size * cfg.threads;
+  const int available_workers = omp_get_num_procs();
+  if (available_workers > 0 && requested_workers > available_workers) {
+    std::cerr << "Warning: oversubscription detected (P*T=" << requested_workers
+              << " > available_workers=" << available_workers
+              << "); headline sweeps should prefer P*T <= C\n";
+  }
+
+  if (cfg.threads > 1 && EnvIsUnsetOrEmpty("OMP_PROC_BIND")) {
+    std::cerr << "Warning: OMP_PROC_BIND is unset; thread placement may vary across runs\n";
+  }
+  if (cfg.threads > 1 && EnvIsUnsetOrEmpty("OMP_PLACES")) {
+    std::cerr << "Warning: OMP_PLACES is unset; affinity/topology mapping may be unstable\n";
+  }
+
+  const char* omp_threads_env = std::getenv("OMP_NUM_THREADS");
+  if (omp_threads_env != nullptr && omp_threads_env[0] != '\0') {
+    char* end = nullptr;
+    const long parsed = std::strtol(omp_threads_env, &end, 10);
+    if (end != omp_threads_env && *end == '\0' && parsed > 0 && parsed != cfg.threads) {
+      std::cerr << "Warning: OMP_NUM_THREADS=" << parsed << " differs from --threads="
+                << cfg.threads << " (runtime applies --threads)\n";
+    }
+  }
+}
+
 omp_sched_t RequestedOmpSchedule(phasegap::cli::OmpSchedule schedule) {
   switch (schedule) {
     case phasegap::cli::OmpSchedule::kStatic:
@@ -167,6 +207,7 @@ int main(int argc, char** argv) {
 
   omp_set_num_threads(cfg.threads);
   omp_set_schedule(RequestedOmpSchedule(cfg.omp_schedule), cfg.omp_chunk);
+  EmitRuntimeWarnings(cfg, world_size, rank);
 
   const phasegap::mpi::RingNeighbors neighbors =
       phasegap::mpi::ComputeRingNeighbors(rank, world_size);
@@ -175,14 +216,32 @@ int main(int argc, char** argv) {
   double halo_sum = 0.0;
   std::uint64_t checksum64_global = 0;
   phasegap::stats::IterationTiming timing_sum{};
+  std::vector<double> t_post_samples;
+  std::vector<double> t_interior_samples;
+  std::vector<double> t_wait_samples;
+  std::vector<double> t_boundary_samples;
+  std::vector<double> t_poll_samples;
+  std::vector<double> t_comm_samples;
+  std::vector<double> t_iter_samples;
+  std::vector<double> polls_to_complete_samples;
   double overlap_ratio_sum_local = 0.0;
   double mpi_test_calls_sum_local = 0.0;
   double mpi_wait_calls_sum_local = 0.0;
+  double polls_to_complete_sum_local = 0.0;
   int measured_iters = 0;
 
   if (cfg.sync == phasegap::cli::SyncMode::kBarrierStart) {
     MPI_Barrier(MPI_COMM_WORLD);
   }
+  const int measured_capacity = std::max(0, cfg.iters - cfg.warmup);
+  t_post_samples.reserve(static_cast<std::size_t>(measured_capacity));
+  t_interior_samples.reserve(static_cast<std::size_t>(measured_capacity));
+  t_wait_samples.reserve(static_cast<std::size_t>(measured_capacity));
+  t_boundary_samples.reserve(static_cast<std::size_t>(measured_capacity));
+  t_poll_samples.reserve(static_cast<std::size_t>(measured_capacity));
+  t_comm_samples.reserve(static_cast<std::size_t>(measured_capacity));
+  t_iter_samples.reserve(static_cast<std::size_t>(measured_capacity));
+  polls_to_complete_samples.reserve(static_cast<std::size_t>(measured_capacity));
 
   std::vector<double> send_left(static_cast<std::size_t>(cfg.halo), 0.0);
   std::vector<double> send_right(static_cast<std::size_t>(cfg.halo), 0.0);
@@ -213,6 +272,7 @@ int main(int argc, char** argv) {
     phasegap::stats::IterationTimer timer;
     int mpi_test_calls = 0;
     int mpi_wait_calls = 0;
+    int polls_to_complete = 0;
     timer.BeginIteration();
 
     if (cfg.sync == phasegap::cli::SyncMode::kBarrierEach) {
@@ -380,6 +440,7 @@ int main(int argc, char** argv) {
                 completed = 1;
               }
               ++mpi_test_calls;
+              ++polls_to_complete;
               timer.EndPoll();
             }
           }
@@ -503,10 +564,19 @@ int main(int argc, char** argv) {
       timing_sum.t_poll_us += t.t_poll_us;
       timing_sum.t_comm_window_us += t.t_comm_window_us;
       timing_sum.t_iter_us += t.t_iter_us;
+      t_post_samples.push_back(t.t_post_us);
+      t_interior_samples.push_back(t.t_interior_us);
+      t_wait_samples.push_back(t.t_wait_us);
+      t_boundary_samples.push_back(t.t_boundary_us);
+      t_poll_samples.push_back(t.t_poll_us);
+      t_comm_samples.push_back(t.t_comm_window_us);
+      t_iter_samples.push_back(t.t_iter_us);
       overlap_ratio_sum_local +=
           phasegap::stats::OverlapRatio(t.t_comm_window_us, t.t_interior_us, t.t_wait_us);
       mpi_test_calls_sum_local += static_cast<double>(mpi_test_calls);
       mpi_wait_calls_sum_local += static_cast<double>(mpi_wait_calls);
+      polls_to_complete_sum_local += static_cast<double>(polls_to_complete);
+      polls_to_complete_samples.push_back(static_cast<double>(polls_to_complete));
       ++measured_iters;
     }
   }
@@ -542,30 +612,99 @@ int main(int argc, char** argv) {
   const double overlap_local = overlap_ratio_sum_local / measured_iters_d;
   const double mpi_test_calls_mean_local = mpi_test_calls_sum_local / measured_iters_d;
   const double mpi_wait_calls_mean_local = mpi_wait_calls_sum_local / measured_iters_d;
+  const double polls_to_complete_mean_local = polls_to_complete_sum_local / measured_iters_d;
+  const double polls_to_complete_p95_local =
+      phasegap::stats::Percentile(polls_to_complete_samples, 0.95);
+  const double t_iter_p50_local = phasegap::stats::Percentile(t_iter_samples, 0.50);
+  const double t_iter_p95_local = phasegap::stats::Percentile(t_iter_samples, 0.95);
+  const double t_post_p50_local = phasegap::stats::Percentile(t_post_samples, 0.50);
+  const double t_post_p95_local = phasegap::stats::Percentile(t_post_samples, 0.95);
+  const double t_interior_p50_local = phasegap::stats::Percentile(t_interior_samples, 0.50);
+  const double t_interior_p95_local = phasegap::stats::Percentile(t_interior_samples, 0.95);
+  const double t_wait_p50_local = phasegap::stats::Percentile(t_wait_samples, 0.50);
+  const double t_wait_p95_local = phasegap::stats::Percentile(t_wait_samples, 0.95);
+  const double t_boundary_p50_local = phasegap::stats::Percentile(t_boundary_samples, 0.50);
+  const double t_boundary_p95_local = phasegap::stats::Percentile(t_boundary_samples, 0.95);
+  const double t_poll_p50_local = phasegap::stats::Percentile(t_poll_samples, 0.50);
+  const double t_poll_p95_local = phasegap::stats::Percentile(t_poll_samples, 0.95);
+  const double t_comm_p50_local = phasegap::stats::Percentile(t_comm_samples, 0.50);
+  const double t_comm_p95_local = phasegap::stats::Percentile(t_comm_samples, 0.95);
 
   double t_post_sum = 0.0;
+  double t_post_max = 0.0;
   double t_interior_sum = 0.0;
+  double t_interior_max = 0.0;
   double t_wait_sum = 0.0;
   double t_wait_max = 0.0;
   double t_boundary_sum = 0.0;
+  double t_boundary_max = 0.0;
   double t_poll_sum = 0.0;
+  double t_poll_max = 0.0;
   double t_iter_sum = 0.0;
+  double t_iter_max = 0.0;
   double t_comm_sum = 0.0;
+  double t_comm_max = 0.0;
+  double t_iter_p50_sum = 0.0;
+  double t_iter_p95_sum = 0.0;
+  double t_post_p50_sum = 0.0;
+  double t_post_p95_sum = 0.0;
+  double t_interior_p50_sum = 0.0;
+  double t_interior_p95_sum = 0.0;
+  double t_wait_p50_sum = 0.0;
+  double t_wait_p95_sum = 0.0;
+  double t_boundary_p50_sum = 0.0;
+  double t_boundary_p95_sum = 0.0;
+  double t_poll_p50_sum = 0.0;
+  double t_poll_p95_sum = 0.0;
+  double t_comm_p50_sum = 0.0;
+  double t_comm_p95_sum = 0.0;
   double overlap_sum = 0.0;
   double mpi_test_calls_sum = 0.0;
   double mpi_wait_calls_sum = 0.0;
+  double polls_to_complete_mean_sum = 0.0;
+  double polls_to_complete_p95_sum = 0.0;
   MPI_Allreduce(&timing_mean_local.t_post_us, &t_post_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&timing_mean_local.t_post_us, &t_post_max, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
   MPI_Allreduce(&timing_mean_local.t_interior_us, &t_interior_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&timing_mean_local.t_interior_us, &t_interior_max, 1, MPI_DOUBLE, MPI_MAX,
+                MPI_COMM_WORLD);
   MPI_Allreduce(&timing_mean_local.t_wait_us, &t_wait_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
   MPI_Allreduce(&timing_mean_local.t_wait_us, &t_wait_max, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
   MPI_Allreduce(&timing_mean_local.t_boundary_us, &t_boundary_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&timing_mean_local.t_boundary_us, &t_boundary_max, 1, MPI_DOUBLE, MPI_MAX,
+                MPI_COMM_WORLD);
   MPI_Allreduce(&timing_mean_local.t_poll_us, &t_poll_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&timing_mean_local.t_poll_us, &t_poll_max, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
   MPI_Allreduce(&timing_mean_local.t_iter_us, &t_iter_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&timing_mean_local.t_iter_us, &t_iter_max, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
   MPI_Allreduce(&timing_mean_local.t_comm_window_us, &t_comm_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&timing_mean_local.t_comm_window_us, &t_comm_max, 1, MPI_DOUBLE, MPI_MAX,
+                MPI_COMM_WORLD);
+  MPI_Allreduce(&t_iter_p50_local, &t_iter_p50_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&t_iter_p95_local, &t_iter_p95_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&t_post_p50_local, &t_post_p50_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&t_post_p95_local, &t_post_p95_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&t_interior_p50_local, &t_interior_p50_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&t_interior_p95_local, &t_interior_p95_sum, 1, MPI_DOUBLE, MPI_SUM,
+                MPI_COMM_WORLD);
+  MPI_Allreduce(&t_wait_p50_local, &t_wait_p50_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&t_wait_p95_local, &t_wait_p95_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&t_boundary_p50_local, &t_boundary_p50_sum, 1, MPI_DOUBLE, MPI_SUM,
+                MPI_COMM_WORLD);
+  MPI_Allreduce(&t_boundary_p95_local, &t_boundary_p95_sum, 1, MPI_DOUBLE, MPI_SUM,
+                MPI_COMM_WORLD);
+  MPI_Allreduce(&t_poll_p50_local, &t_poll_p50_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&t_poll_p95_local, &t_poll_p95_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&t_comm_p50_local, &t_comm_p50_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&t_comm_p95_local, &t_comm_p95_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
   MPI_Allreduce(&overlap_local, &overlap_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
   MPI_Allreduce(&mpi_test_calls_mean_local, &mpi_test_calls_sum, 1, MPI_DOUBLE, MPI_SUM,
                 MPI_COMM_WORLD);
   MPI_Allreduce(&mpi_wait_calls_mean_local, &mpi_wait_calls_sum, 1, MPI_DOUBLE, MPI_SUM,
+                MPI_COMM_WORLD);
+  MPI_Allreduce(&polls_to_complete_mean_local, &polls_to_complete_mean_sum, 1, MPI_DOUBLE, MPI_SUM,
+                MPI_COMM_WORLD);
+  MPI_Allreduce(&polls_to_complete_p95_local, &polls_to_complete_p95_sum, 1, MPI_DOUBLE, MPI_SUM,
                 MPI_COMM_WORLD);
 
   const double t_post_mean_avg = t_post_sum / static_cast<double>(world_size);
@@ -575,13 +714,38 @@ int main(int argc, char** argv) {
   const double t_poll_mean_avg = t_poll_sum / static_cast<double>(world_size);
   const double t_iter_mean_avg = t_iter_sum / static_cast<double>(world_size);
   const double t_comm_mean_avg = t_comm_sum / static_cast<double>(world_size);
+  const double t_post_mean_max = t_post_max;
+  const double t_interior_mean_max = t_interior_max;
+  const double t_wait_mean_max = t_wait_max;
+  const double t_boundary_mean_max = t_boundary_max;
+  const double t_poll_mean_max = t_poll_max;
+  const double t_iter_mean_max = t_iter_max;
+  const double t_comm_mean_max = t_comm_max;
+  const double t_iter_p50_avg = t_iter_p50_sum / static_cast<double>(world_size);
+  const double t_iter_p95_avg = t_iter_p95_sum / static_cast<double>(world_size);
+  const double t_post_p50_avg = t_post_p50_sum / static_cast<double>(world_size);
+  const double t_post_p95_avg = t_post_p95_sum / static_cast<double>(world_size);
+  const double t_interior_p50_avg = t_interior_p50_sum / static_cast<double>(world_size);
+  const double t_interior_p95_avg = t_interior_p95_sum / static_cast<double>(world_size);
+  const double t_wait_p50_avg = t_wait_p50_sum / static_cast<double>(world_size);
+  const double t_wait_p95_avg = t_wait_p95_sum / static_cast<double>(world_size);
+  const double t_boundary_p50_avg = t_boundary_p50_sum / static_cast<double>(world_size);
+  const double t_boundary_p95_avg = t_boundary_p95_sum / static_cast<double>(world_size);
+  const double t_poll_p50_avg = t_poll_p50_sum / static_cast<double>(world_size);
+  const double t_poll_p95_avg = t_poll_p95_sum / static_cast<double>(world_size);
+  const double t_comm_p50_avg = t_comm_p50_sum / static_cast<double>(world_size);
+  const double t_comm_p95_avg = t_comm_p95_sum / static_cast<double>(world_size);
   const double overlap_ratio_avg = overlap_sum / static_cast<double>(world_size);
   const double mpi_test_calls_mean_avg = mpi_test_calls_sum / static_cast<double>(world_size);
   const double mpi_wait_calls_mean_avg = mpi_wait_calls_sum / static_cast<double>(world_size);
+  const double polls_to_complete_mean_avg =
+      polls_to_complete_mean_sum / static_cast<double>(world_size);
+  const double polls_to_complete_p95_avg =
+      polls_to_complete_p95_sum / static_cast<double>(world_size);
 
   if (rank == 0) {
     const double wait_frac = phasegap::stats::WaitFraction(t_wait_mean_avg, t_iter_mean_avg);
-    const double wait_skew = phasegap::stats::WaitSkew(t_wait_max, t_wait_mean_avg);
+    const double wait_skew = phasegap::stats::WaitSkew(t_wait_mean_max, t_wait_mean_avg);
     const phasegap::stats::BandwidthMetrics bw = phasegap::stats::ComputeBandwidthMetrics(
         cfg.halo, sizeof(double), t_comm_mean_avg);
     phasegap::stats::CsvSummary csv_summary{};
@@ -599,12 +763,35 @@ int main(int argc, char** argv) {
     csv_summary.t_boundary_us = t_boundary_mean_avg;
     csv_summary.t_poll_us = t_poll_mean_avg;
     csv_summary.t_comm_window_us = t_comm_mean_avg;
+    csv_summary.t_iter_mean_max_us = t_iter_mean_max;
+    csv_summary.t_post_mean_max_us = t_post_mean_max;
+    csv_summary.t_interior_mean_max_us = t_interior_mean_max;
+    csv_summary.t_wait_mean_max_us = t_wait_mean_max;
+    csv_summary.t_boundary_mean_max_us = t_boundary_mean_max;
+    csv_summary.t_poll_mean_max_us = t_poll_mean_max;
+    csv_summary.t_comm_window_mean_max_us = t_comm_mean_max;
+    csv_summary.t_iter_p50_us = t_iter_p50_avg;
+    csv_summary.t_iter_p95_us = t_iter_p95_avg;
+    csv_summary.t_post_p50_us = t_post_p50_avg;
+    csv_summary.t_post_p95_us = t_post_p95_avg;
+    csv_summary.t_interior_p50_us = t_interior_p50_avg;
+    csv_summary.t_interior_p95_us = t_interior_p95_avg;
+    csv_summary.t_wait_p50_us = t_wait_p50_avg;
+    csv_summary.t_wait_p95_us = t_wait_p95_avg;
+    csv_summary.t_boundary_p50_us = t_boundary_p50_avg;
+    csv_summary.t_boundary_p95_us = t_boundary_p95_avg;
+    csv_summary.t_poll_p50_us = t_poll_p50_avg;
+    csv_summary.t_poll_p95_us = t_poll_p95_avg;
+    csv_summary.t_comm_window_p50_us = t_comm_p50_avg;
+    csv_summary.t_comm_window_p95_us = t_comm_p95_avg;
     csv_summary.wait_frac = wait_frac;
     csv_summary.wait_skew = wait_skew;
     csv_summary.overlap_ratio = overlap_ratio_avg;
     csv_summary.bw_effective_bytes_per_us = bw.bw_effective_bytes_per_us;
     csv_summary.mpi_test_calls = mpi_test_calls_mean_avg;
     csv_summary.mpi_wait_calls = mpi_wait_calls_mean_avg;
+    csv_summary.polls_to_complete_mean = polls_to_complete_mean_avg;
+    csv_summary.polls_to_complete_p95 = polls_to_complete_p95_avg;
     const bool csv_ok = phasegap::stats::WriteCsvRow(cfg, csv_summary, "csv");
     if (!csv_ok) {
       MPI_Finalize();
@@ -624,11 +811,34 @@ int main(int argc, char** argv) {
       summary.t_boundary_us = t_boundary_mean_avg;
       summary.t_poll_us = t_poll_mean_avg;
       summary.t_comm_window_us = t_comm_mean_avg;
+      summary.t_iter_mean_max_us = t_iter_mean_max;
+      summary.t_post_mean_max_us = t_post_mean_max;
+      summary.t_interior_mean_max_us = t_interior_mean_max;
+      summary.t_wait_mean_max_us = t_wait_mean_max;
+      summary.t_boundary_mean_max_us = t_boundary_mean_max;
+      summary.t_poll_mean_max_us = t_poll_mean_max;
+      summary.t_comm_window_mean_max_us = t_comm_mean_max;
+      summary.t_iter_p50_us = t_iter_p50_avg;
+      summary.t_iter_p95_us = t_iter_p95_avg;
+      summary.t_post_p50_us = t_post_p50_avg;
+      summary.t_post_p95_us = t_post_p95_avg;
+      summary.t_interior_p50_us = t_interior_p50_avg;
+      summary.t_interior_p95_us = t_interior_p95_avg;
+      summary.t_wait_p50_us = t_wait_p50_avg;
+      summary.t_wait_p95_us = t_wait_p95_avg;
+      summary.t_boundary_p50_us = t_boundary_p50_avg;
+      summary.t_boundary_p95_us = t_boundary_p95_avg;
+      summary.t_poll_p50_us = t_poll_p50_avg;
+      summary.t_poll_p95_us = t_poll_p95_avg;
+      summary.t_comm_window_p50_us = t_comm_p50_avg;
+      summary.t_comm_window_p95_us = t_comm_p95_avg;
       summary.wait_frac = wait_frac;
       summary.wait_skew = wait_skew;
       summary.overlap_ratio = overlap_ratio_avg;
       summary.mpi_test_calls = mpi_test_calls_mean_avg;
       summary.mpi_wait_calls = mpi_wait_calls_mean_avg;
+      summary.polls_to_complete_mean = polls_to_complete_mean_avg;
+      summary.polls_to_complete_p95 = polls_to_complete_p95_avg;
       const bool manifest_ok =
           phasegap::stats::WriteManifest(cfg, summary, provided, "manifest");
       if (!manifest_ok) {
@@ -683,6 +893,9 @@ int main(int argc, char** argv) {
               << " | t_boundary_us=" << t_boundary_mean_avg
               << " | t_poll_us=" << t_poll_mean_avg
               << " | t_comm_window_us=" << t_comm_mean_avg
+              << " | t_iter_p50_us=" << t_iter_p50_avg
+              << " | t_iter_p95_us=" << t_iter_p95_avg
+              << " | t_wait_mean_max_us=" << t_wait_mean_max
               << " | wait_frac=" << wait_frac
               << " | wait_skew=" << wait_skew
               << " | overlap_ratio=" << overlap_ratio_avg
@@ -691,6 +904,8 @@ int main(int argc, char** argv) {
               << " | bw_effective_bytes_per_us=" << bw.bw_effective_bytes_per_us
               << " | mpi_test_calls=" << mpi_test_calls_mean_avg
               << " | mpi_wait_calls=" << mpi_wait_calls_mean_avg
+              << " | polls_to_complete_mean=" << polls_to_complete_mean_avg
+              << " | polls_to_complete_p95=" << polls_to_complete_p95_avg
               << " | mpi_thread_requested=" << phasegap::cli::ToString(cfg.mpi_thread)
               << " | mpi_thread_provided=" << provided
               << '\n';

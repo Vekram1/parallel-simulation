@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <vector>
 
 namespace phasegap::stats {
 
@@ -16,6 +17,6 @@ struct BandwidthMetrics {
 
 BandwidthMetrics ComputeBandwidthMetrics(int halo_elems, std::size_t element_size_bytes,
                                          double t_comm_window_mean_us);
+double Percentile(std::vector<double> values, double q);
 
 }  // namespace phasegap::stats
-
