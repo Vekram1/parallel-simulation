@@ -35,6 +35,7 @@ add_executable(phasegap
   src/stats/manifest.cpp
   src/stats/metrics.cpp
   src/stats/timer.cpp
+  src/trace/writer.cpp
 )
 
 target_include_directories(phasegap

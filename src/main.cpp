@@ -16,6 +16,7 @@
 #include "phasegap/stats/manifest.hpp"
 #include "phasegap/stats/metrics.hpp"
 #include "phasegap/stats/timer.hpp"
+#include "phasegap/trace/writer.hpp"
 
 namespace {
 
@@ -520,6 +521,27 @@ int main(int argc, char** argv) {
       const bool manifest_ok =
           phasegap::stats::WriteManifest(cfg, summary, provided, "manifest");
       if (!manifest_ok) {
+        MPI_Finalize();
+        return EXIT_FAILURE;
+      }
+    }
+
+    if (cfg.trace) {
+      phasegap::trace::TraceSummary trace_summary{};
+      trace_summary.ranks = world_size;
+      trace_summary.omp_threads = omp_threads;
+      trace_summary.measured_iters = measured_iters;
+      trace_summary.trace_iters = cfg.trace_iters;
+      trace_summary.mpi_thread_provided = provided;
+      trace_summary.t_post_us = t_post_mean_avg;
+      trace_summary.t_interior_us = t_interior_mean_avg;
+      trace_summary.t_wait_us = t_wait_mean_avg;
+      trace_summary.t_boundary_us = t_boundary_mean_avg;
+      trace_summary.t_iter_us = t_iter_mean_avg;
+      trace_summary.wait_frac = wait_frac;
+      trace_summary.overlap_ratio = overlap_ratio_avg;
+      const bool trace_ok = phasegap::trace::WriteTrace(cfg, trace_summary, "trace");
+      if (!trace_ok) {
         MPI_Finalize();
         return EXIT_FAILURE;
       }
