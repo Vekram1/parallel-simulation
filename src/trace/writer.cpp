@@ -117,12 +117,6 @@ bool WriteTrace(const cli::Config& cfg, const TraceSummary& summary, const char*
     return false;
   }
 
-  // Minimal baseline trace envelope for portability and quick visual checks.
-  const double t_post = std::max(0.0, summary.t_post_us);
-  const double t_interior = std::max(0.0, summary.t_interior_us);
-  const double t_wait = std::max(0.0, summary.t_wait_us);
-  const double t_boundary = std::max(0.0, summary.t_boundary_us);
-
   out << "{\n";
   out << "  \"trace_schema_version\": 1,\n";
   out << "  \"timestamp\": \"" << JsonEscape(CurrentTimestampUtc()) << "\",\n";
@@ -139,7 +133,9 @@ bool WriteTrace(const cli::Config& cfg, const TraceSummary& summary, const char*
   out << "    \"trace_iters\": " << summary.trace_iters << ",\n";
   out << "    \"measured_iters\": " << summary.measured_iters << ",\n";
   out << "    \"mpi_thread_requested\": \"" << cli::ToString(cfg.mpi_thread) << "\",\n";
-  out << "    \"mpi_thread_provided\": " << summary.mpi_thread_provided << "\n";
+  out << "    \"mpi_thread_provided\": " << summary.mpi_thread_provided << ",\n";
+  out << "    \"trace_window_start_iter\": " << summary.trace_window_start_iter << ",\n";
+  out << "    \"bytes_total\": " << summary.bytes_total << "\n";
   out << "  },\n";
   out << "  \"summary\": {\n";
   out << "    \"t_iter_us\": " << summary.t_iter_us << ",\n";
@@ -154,15 +150,137 @@ bool WriteTrace(const cli::Config& cfg, const TraceSummary& summary, const char*
   out << "    \"OMPI_MCA_btl\": \"" << JsonEscape(GetEnv("OMPI_MCA_btl")) << "\"\n";
   out << "  },\n";
   out << "  \"traceEvents\": [\n";
-  out << "    {\"name\":\"comm_post\",\"cat\":\"phase\",\"ph\":\"X\",\"pid\":0,\"tid\":0,\"ts\":0,"
-      << "\"dur\":" << t_post << "},\n";
-  out << "    {\"name\":\"interior_compute\",\"cat\":\"phase\",\"ph\":\"X\",\"pid\":0,\"tid\":0,\"ts\":"
-      << t_post << ",\"dur\":" << t_interior << "},\n";
-  out << "    {\"name\":\"waitall\",\"cat\":\"phase\",\"ph\":\"X\",\"pid\":0,\"tid\":0,\"ts\":"
-      << (t_post + t_interior) << ",\"dur\":" << t_wait << "},\n";
-  out << "    {\"name\":\"boundary_compute\",\"cat\":\"phase\",\"ph\":\"X\",\"pid\":0,\"tid\":0,\"ts\":"
-      << (t_post + t_interior + t_wait) << ",\"dur\":" << t_boundary << "}\n";
-  out << "  ]\n";
+  bool first_event = true;
+  const auto emit_event = [&](const std::string& json_line) {
+    if (!first_event) {
+      out << ",\n";
+    }
+    first_event = false;
+    out << "    " << json_line;
+  };
+
+  const int trace_iters = std::max(0, summary.trace_iters);
+  const int rank_count = std::max(0, summary.ranks);
+  const int expected_rank_entries = rank_count * trace_iters;
+  const bool have_rank_data =
+      static_cast<int>(summary.rank_iterations.size()) >= expected_rank_entries;
+  if (trace_iters > 0 && !have_rank_data) {
+    std::cerr << error_prefix << " missing rank iteration trace data: expected at least "
+              << expected_rank_entries << " rows, got " << summary.rank_iterations.size() << '\n';
+    return false;
+  }
+  const int expected_thread_entries = rank_count * trace_iters * std::max(1, summary.omp_threads);
+  const bool have_thread_data = static_cast<int>(summary.thread_interior_us.size()) >=
+                                    expected_thread_entries &&
+                                static_cast<int>(summary.thread_boundary_us.size()) >=
+                                    expected_thread_entries;
+  if (cfg.trace_detail == cli::TraceDetail::kThread && trace_iters > 0 && !have_thread_data) {
+    std::cerr << error_prefix
+              << " warning: trace_detail=thread requested but thread span payload is incomplete; "
+                 "emitting rank-lane phase spans only\n";
+  }
+
+  if (trace_iters > 0 && have_rank_data) {
+    for (int rank = 0; rank < rank_count; ++rank) {
+      double rank_ts = 0.0;
+      for (int iter = 0; iter < trace_iters; ++iter) {
+        const int rank_iter_idx = rank * trace_iters + iter;
+        const TraceSummary::RankIteration& row = summary.rank_iterations[rank_iter_idx];
+        const double t_post = std::max(0.0, row.t_post_us);
+        const double t_interior = std::max(0.0, row.t_interior_us);
+        const double t_wait = std::max(0.0, row.t_wait_us);
+        const double t_boundary = std::max(0.0, row.t_boundary_us);
+        const double t_iter = std::max(std::max(0.0, row.t_iter_us), t_post + t_interior + t_wait + t_boundary);
+
+        const int measured_iter = summary.trace_window_start_iter + iter;
+        const double ts_post = rank_ts;
+        const double ts_interior = ts_post + t_post;
+        const double ts_wait = ts_interior + t_interior;
+        const double ts_boundary = ts_wait + t_wait;
+        const double ts_end = rank_ts + t_iter;
+
+        {
+          std::ostringstream e;
+          e << "{\"name\":\"comm_post\",\"cat\":\"phase\",\"ph\":\"X\",\"pid\":" << rank
+            << ",\"tid\":0,\"ts\":" << ts_post << ",\"dur\":" << t_post
+            << ",\"args\":{\"iter\":" << measured_iter << "}}";
+          emit_event(e.str());
+        }
+        {
+          std::ostringstream e;
+          e << "{\"name\":\"interior_compute\",\"cat\":\"phase\",\"ph\":\"X\",\"pid\":" << rank
+            << ",\"tid\":0,\"ts\":" << ts_interior << ",\"dur\":" << t_interior
+            << ",\"args\":{\"iter\":" << measured_iter << "}}";
+          emit_event(e.str());
+        }
+        {
+          std::ostringstream e;
+          e << "{\"name\":\"waitall\",\"cat\":\"phase\",\"ph\":\"X\",\"pid\":" << rank
+            << ",\"tid\":0,\"ts\":" << ts_wait << ",\"dur\":" << t_wait
+            << ",\"args\":{\"iter\":" << measured_iter << "}}";
+          emit_event(e.str());
+        }
+        {
+          std::ostringstream e;
+          e << "{\"name\":\"boundary_compute\",\"cat\":\"phase\",\"ph\":\"X\",\"pid\":" << rank
+            << ",\"tid\":0,\"ts\":" << ts_boundary << ",\"dur\":" << t_boundary
+            << ",\"args\":{\"iter\":" << measured_iter << "}}";
+          emit_event(e.str());
+        }
+
+        {
+          std::ostringstream e;
+          e << "{\"name\":\"bytes_total\",\"cat\":\"counter\",\"ph\":\"C\",\"pid\":" << rank
+            << ",\"tid\":0,\"ts\":" << ts_end << ",\"args\":{\"value\":" << row.bytes_total << "}}";
+          emit_event(e.str());
+        }
+        {
+          std::ostringstream e;
+          e << "{\"name\":\"mpi_test_calls\",\"cat\":\"counter\",\"ph\":\"C\",\"pid\":" << rank
+            << ",\"tid\":0,\"ts\":" << ts_end << ",\"args\":{\"value\":" << row.mpi_test_calls
+            << "}}";
+          emit_event(e.str());
+        }
+        {
+          std::ostringstream e;
+          e << "{\"name\":\"t_wait_us\",\"cat\":\"counter\",\"ph\":\"C\",\"pid\":" << rank
+            << ",\"tid\":0,\"ts\":" << ts_end << ",\"args\":{\"value\":" << row.t_wait_us << "}}";
+          emit_event(e.str());
+        }
+        {
+          std::ostringstream e;
+          e << "{\"name\":\"wait_frac\",\"cat\":\"counter\",\"ph\":\"C\",\"pid\":" << rank
+            << ",\"tid\":0,\"ts\":" << ts_end << ",\"args\":{\"value\":" << row.wait_frac << "}}";
+          emit_event(e.str());
+        }
+
+        if (cfg.trace_detail == cli::TraceDetail::kThread && have_thread_data && summary.omp_threads > 0) {
+          const int base = (rank * trace_iters + iter) * summary.omp_threads;
+          for (int tid = 0; tid < summary.omp_threads; ++tid) {
+            const double thread_interior = std::max(0.0, summary.thread_interior_us[base + tid]);
+            const double thread_boundary = std::max(0.0, summary.thread_boundary_us[base + tid]);
+            if (thread_interior > 0.0) {
+              std::ostringstream e;
+              e << "{\"name\":\"interior_compute\",\"cat\":\"phase\",\"ph\":\"X\",\"pid\":" << rank
+                << ",\"tid\":" << (tid + 1) << ",\"ts\":" << ts_interior << ",\"dur\":"
+                << thread_interior << ",\"args\":{\"iter\":" << measured_iter << "}}";
+              emit_event(e.str());
+            }
+            if (thread_boundary > 0.0) {
+              std::ostringstream e;
+              e << "{\"name\":\"boundary_compute\",\"cat\":\"phase\",\"ph\":\"X\",\"pid\":" << rank
+                << ",\"tid\":" << (tid + 1) << ",\"ts\":" << ts_boundary << ",\"dur\":"
+                << thread_boundary << ",\"args\":{\"iter\":" << measured_iter << "}}";
+              emit_event(e.str());
+            }
+          }
+        }
+
+        rank_ts += t_iter;
+      }
+    }
+  }
+  out << "\n  ]\n";
   out << "}\n";
 
   if (!out.good()) {

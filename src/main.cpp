@@ -8,6 +8,7 @@
 #include <limits>
 #include <numeric>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "phasegap/cli.hpp"
@@ -223,6 +224,7 @@ int main(int argc, char** argv) {
   std::vector<double> t_poll_samples;
   std::vector<double> t_comm_samples;
   std::vector<double> t_iter_samples;
+  std::vector<double> mpi_test_calls_samples;
   std::vector<double> polls_to_complete_samples;
   double overlap_ratio_sum_local = 0.0;
   double mpi_test_calls_sum_local = 0.0;
@@ -234,6 +236,8 @@ int main(int argc, char** argv) {
     MPI_Barrier(MPI_COMM_WORLD);
   }
   const int measured_capacity = std::max(0, cfg.iters - cfg.warmup);
+  const int trace_window_iters = cfg.trace ? std::min(cfg.trace_iters, measured_capacity) : 0;
+  const int trace_window_start = measured_capacity - trace_window_iters;
   t_post_samples.reserve(static_cast<std::size_t>(measured_capacity));
   t_interior_samples.reserve(static_cast<std::size_t>(measured_capacity));
   t_wait_samples.reserve(static_cast<std::size_t>(measured_capacity));
@@ -241,7 +245,12 @@ int main(int argc, char** argv) {
   t_poll_samples.reserve(static_cast<std::size_t>(measured_capacity));
   t_comm_samples.reserve(static_cast<std::size_t>(measured_capacity));
   t_iter_samples.reserve(static_cast<std::size_t>(measured_capacity));
+  mpi_test_calls_samples.reserve(static_cast<std::size_t>(measured_capacity));
   polls_to_complete_samples.reserve(static_cast<std::size_t>(measured_capacity));
+  std::vector<double> trace_thread_interior_local(
+      static_cast<std::size_t>(trace_window_iters * cfg.threads), 0.0);
+  std::vector<double> trace_thread_boundary_local(
+      static_cast<std::size_t>(trace_window_iters * cfg.threads), 0.0);
 
   std::vector<double> send_left(static_cast<std::size_t>(cfg.halo), 0.0);
   std::vector<double> send_right(static_cast<std::size_t>(cfg.halo), 0.0);
@@ -273,6 +282,19 @@ int main(int argc, char** argv) {
     int mpi_test_calls = 0;
     int mpi_wait_calls = 0;
     int polls_to_complete = 0;
+    int trace_slot = -1;
+    if (cfg.trace && iter >= cfg.warmup) {
+      const int measured_idx = iter - cfg.warmup;
+      if (measured_idx >= trace_window_start) {
+        trace_slot = measured_idx - trace_window_start;
+      }
+    }
+    if (trace_slot >= 0 && cfg.trace_detail == phasegap::cli::TraceDetail::kThread) {
+      std::fill_n(&trace_thread_interior_local[static_cast<std::size_t>(trace_slot * cfg.threads)],
+                  static_cast<std::size_t>(cfg.threads), 0.0);
+      std::fill_n(&trace_thread_boundary_local[static_cast<std::size_t>(trace_slot * cfg.threads)],
+                  static_cast<std::size_t>(cfg.threads), 0.0);
+    }
     timer.BeginIteration();
 
     if (cfg.sync == phasegap::cli::SyncMode::kBarrierEach) {
@@ -337,6 +359,7 @@ int main(int argc, char** argv) {
 
 #pragma omp parallel
       {
+        const int tid = omp_get_thread_num();
         const phasegap::stats::TimePoint interior_start = phasegap::stats::SteadyClock::now();
 #pragma omp for nowait schedule(runtime)
         for (int i = interior_begin; i < interior_end; ++i) {
@@ -344,6 +367,11 @@ int main(int argc, char** argv) {
         }
         const double thread_interior_us =
             phasegap::stats::DurationMicros(interior_start, phasegap::stats::SteadyClock::now());
+        if (trace_slot >= 0 && cfg.trace_detail == phasegap::cli::TraceDetail::kThread &&
+            tid < cfg.threads) {
+          trace_thread_interior_local[static_cast<std::size_t>(trace_slot * cfg.threads + tid)] =
+              thread_interior_us;
+        }
 #pragma omp critical
         {
           interior_work_us = std::max(interior_work_us, thread_interior_us);
@@ -354,6 +382,7 @@ int main(int argc, char** argv) {
 
 #pragma omp master
         timer.BeginBoundary();
+        const phasegap::stats::TimePoint boundary_start = phasegap::stats::SteadyClock::now();
 #pragma omp for schedule(runtime)
         for (int i = buffers.OwnedBegin(); i < left_boundary_end; ++i) {
           buffers.next[static_cast<std::size_t>(i)] = UpdatePoint(buffers, i, cfg.kernel, cfg.radius);
@@ -361,6 +390,13 @@ int main(int argc, char** argv) {
 #pragma omp for schedule(runtime)
         for (int i = right_boundary_begin; i < buffers.OwnedEnd(); ++i) {
           buffers.next[static_cast<std::size_t>(i)] = UpdatePoint(buffers, i, cfg.kernel, cfg.radius);
+        }
+        const double thread_boundary_us =
+            phasegap::stats::DurationMicros(boundary_start, phasegap::stats::SteadyClock::now());
+        if (trace_slot >= 0 && cfg.trace_detail == phasegap::cli::TraceDetail::kThread &&
+            tid < cfg.threads) {
+          trace_thread_boundary_local[static_cast<std::size_t>(trace_slot * cfg.threads + tid)] =
+              thread_boundary_us;
         }
 #pragma omp master
         timer.EndBoundary();
@@ -412,6 +448,7 @@ int main(int argc, char** argv) {
         double interior_work_us = 0.0;
 #pragma omp parallel shared(completed, interior_work_us)
         {
+          const int tid = omp_get_thread_num();
           // Measure each worker's interior compute span and use max to avoid
           // master-thread barrier/poll skew inflating interior duration.
           const phasegap::stats::TimePoint interior_start = phasegap::stats::SteadyClock::now();
@@ -421,6 +458,11 @@ int main(int argc, char** argv) {
           }
           const double thread_interior_us =
               phasegap::stats::DurationMicros(interior_start, phasegap::stats::SteadyClock::now());
+          if (trace_slot >= 0 && cfg.trace_detail == phasegap::cli::TraceDetail::kThread &&
+              tid < cfg.threads) {
+            trace_thread_interior_local[static_cast<std::size_t>(trace_slot * cfg.threads + tid)] =
+                thread_interior_us;
+          }
 #pragma omp critical
           {
             interior_work_us = std::max(interior_work_us, thread_interior_us);
@@ -470,6 +512,7 @@ int main(int argc, char** argv) {
 
 #pragma omp master
           timer.BeginBoundary();
+          const phasegap::stats::TimePoint boundary_start = phasegap::stats::SteadyClock::now();
 #pragma omp for schedule(runtime)
           for (int i = buffers.OwnedBegin(); i < left_boundary_end; ++i) {
             buffers.next[static_cast<std::size_t>(i)] = UpdatePoint(buffers, i, cfg.kernel, cfg.radius);
@@ -478,6 +521,13 @@ int main(int argc, char** argv) {
           for (int i = right_boundary_begin; i < buffers.OwnedEnd(); ++i) {
             buffers.next[static_cast<std::size_t>(i)] = UpdatePoint(buffers, i, cfg.kernel, cfg.radius);
           }
+          const double thread_boundary_us =
+              phasegap::stats::DurationMicros(boundary_start, phasegap::stats::SteadyClock::now());
+          if (trace_slot >= 0 && cfg.trace_detail == phasegap::cli::TraceDetail::kThread &&
+              tid < cfg.threads) {
+            trace_thread_boundary_local[static_cast<std::size_t>(trace_slot * cfg.threads + tid)] =
+                thread_boundary_us;
+          }
 #pragma omp master
           timer.EndBoundary();
         }
@@ -485,6 +535,7 @@ int main(int argc, char** argv) {
         double interior_work_us = 0.0;
 #pragma omp parallel
         {
+          const int tid = omp_get_thread_num();
           // Interior compute should overlap communication in nonblocking modes.
           const phasegap::stats::TimePoint interior_start = phasegap::stats::SteadyClock::now();
 #pragma omp for nowait schedule(runtime)
@@ -493,6 +544,11 @@ int main(int argc, char** argv) {
           }
           const double thread_interior_us =
               phasegap::stats::DurationMicros(interior_start, phasegap::stats::SteadyClock::now());
+          if (trace_slot >= 0 && cfg.trace_detail == phasegap::cli::TraceDetail::kThread &&
+              tid < cfg.threads) {
+            trace_thread_interior_local[static_cast<std::size_t>(trace_slot * cfg.threads + tid)] =
+                thread_interior_us;
+          }
 #pragma omp critical
           {
             interior_work_us = std::max(interior_work_us, thread_interior_us);
@@ -519,6 +575,7 @@ int main(int argc, char** argv) {
 
 #pragma omp master
           timer.BeginBoundary();
+          const phasegap::stats::TimePoint boundary_start = phasegap::stats::SteadyClock::now();
 #pragma omp for schedule(runtime)
           for (int i = buffers.OwnedBegin(); i < left_boundary_end; ++i) {
             buffers.next[static_cast<std::size_t>(i)] = UpdatePoint(buffers, i, cfg.kernel, cfg.radius);
@@ -526,6 +583,13 @@ int main(int argc, char** argv) {
 #pragma omp for schedule(runtime)
           for (int i = right_boundary_begin; i < buffers.OwnedEnd(); ++i) {
             buffers.next[static_cast<std::size_t>(i)] = UpdatePoint(buffers, i, cfg.kernel, cfg.radius);
+          }
+          const double thread_boundary_us =
+              phasegap::stats::DurationMicros(boundary_start, phasegap::stats::SteadyClock::now());
+          if (trace_slot >= 0 && cfg.trace_detail == phasegap::cli::TraceDetail::kThread &&
+              tid < cfg.threads) {
+            trace_thread_boundary_local[static_cast<std::size_t>(trace_slot * cfg.threads + tid)] =
+                thread_boundary_us;
           }
 #pragma omp master
           timer.EndBoundary();
@@ -571,6 +635,7 @@ int main(int argc, char** argv) {
       t_poll_samples.push_back(t.t_poll_us);
       t_comm_samples.push_back(t.t_comm_window_us);
       t_iter_samples.push_back(t.t_iter_us);
+      mpi_test_calls_samples.push_back(static_cast<double>(mpi_test_calls));
       overlap_ratio_sum_local +=
           phasegap::stats::OverlapRatio(t.t_comm_window_us, t.t_interior_us, t.t_wait_us);
       mpi_test_calls_sum_local += static_cast<double>(mpi_test_calls);
@@ -743,6 +808,94 @@ int main(int argc, char** argv) {
   const double polls_to_complete_p95_avg =
       polls_to_complete_p95_sum / static_cast<double>(world_size);
 
+  std::vector<double> trace_post_global;
+  std::vector<double> trace_interior_global;
+  std::vector<double> trace_wait_global;
+  std::vector<double> trace_boundary_global;
+  std::vector<double> trace_iter_global;
+  std::vector<double> trace_wait_frac_global;
+  std::vector<double> trace_mpi_test_calls_global;
+  std::vector<std::uint64_t> trace_bytes_total_global;
+  std::vector<double> trace_thread_interior_global;
+  std::vector<double> trace_thread_boundary_global;
+
+  if (cfg.trace && trace_window_iters > 0) {
+    std::vector<double> trace_post_local(static_cast<std::size_t>(trace_window_iters), 0.0);
+    std::vector<double> trace_interior_local(static_cast<std::size_t>(trace_window_iters), 0.0);
+    std::vector<double> trace_wait_local(static_cast<std::size_t>(trace_window_iters), 0.0);
+    std::vector<double> trace_boundary_local(static_cast<std::size_t>(trace_window_iters), 0.0);
+    std::vector<double> trace_iter_local(static_cast<std::size_t>(trace_window_iters), 0.0);
+    std::vector<double> trace_wait_frac_local(static_cast<std::size_t>(trace_window_iters), 0.0);
+    std::vector<double> trace_mpi_test_calls_local(static_cast<std::size_t>(trace_window_iters), 0.0);
+    std::vector<std::uint64_t> trace_bytes_total_local(static_cast<std::size_t>(trace_window_iters),
+                                                       static_cast<std::uint64_t>(2) *
+                                                           static_cast<std::uint64_t>(cfg.halo) *
+                                                           static_cast<std::uint64_t>(sizeof(double)));
+
+    for (int i = 0; i < trace_window_iters; ++i) {
+      const int idx = trace_window_start + i;
+      trace_post_local[static_cast<std::size_t>(i)] = t_post_samples[static_cast<std::size_t>(idx)];
+      trace_interior_local[static_cast<std::size_t>(i)] =
+          t_interior_samples[static_cast<std::size_t>(idx)];
+      trace_wait_local[static_cast<std::size_t>(i)] = t_wait_samples[static_cast<std::size_t>(idx)];
+      trace_boundary_local[static_cast<std::size_t>(i)] =
+          t_boundary_samples[static_cast<std::size_t>(idx)];
+      trace_iter_local[static_cast<std::size_t>(i)] = t_iter_samples[static_cast<std::size_t>(idx)];
+      trace_wait_frac_local[static_cast<std::size_t>(i)] = phasegap::stats::WaitFraction(
+          trace_wait_local[static_cast<std::size_t>(i)], trace_iter_local[static_cast<std::size_t>(i)]);
+      trace_mpi_test_calls_local[static_cast<std::size_t>(i)] =
+          mpi_test_calls_samples[static_cast<std::size_t>(idx)];
+    }
+
+    const std::size_t gathered_size =
+        static_cast<std::size_t>(world_size * trace_window_iters);
+    if (rank == 0) {
+      trace_post_global.resize(gathered_size);
+      trace_interior_global.resize(gathered_size);
+      trace_wait_global.resize(gathered_size);
+      trace_boundary_global.resize(gathered_size);
+      trace_iter_global.resize(gathered_size);
+      trace_wait_frac_global.resize(gathered_size);
+      trace_mpi_test_calls_global.resize(gathered_size);
+      trace_bytes_total_global.resize(gathered_size);
+    }
+
+    MPI_Gather(trace_post_local.data(), trace_window_iters, MPI_DOUBLE, trace_post_global.data(),
+               trace_window_iters, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Gather(trace_interior_local.data(), trace_window_iters, MPI_DOUBLE,
+               trace_interior_global.data(), trace_window_iters, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Gather(trace_wait_local.data(), trace_window_iters, MPI_DOUBLE, trace_wait_global.data(),
+               trace_window_iters, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Gather(trace_boundary_local.data(), trace_window_iters, MPI_DOUBLE,
+               trace_boundary_global.data(), trace_window_iters, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Gather(trace_iter_local.data(), trace_window_iters, MPI_DOUBLE, trace_iter_global.data(),
+               trace_window_iters, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Gather(trace_wait_frac_local.data(), trace_window_iters, MPI_DOUBLE,
+               trace_wait_frac_global.data(), trace_window_iters, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Gather(trace_mpi_test_calls_local.data(), trace_window_iters, MPI_DOUBLE,
+               trace_mpi_test_calls_global.data(), trace_window_iters, MPI_DOUBLE, 0,
+               MPI_COMM_WORLD);
+    MPI_Gather(trace_bytes_total_local.data(), trace_window_iters, MPI_UINT64_T,
+               trace_bytes_total_global.data(), trace_window_iters, MPI_UINT64_T, 0,
+               MPI_COMM_WORLD);
+
+    if (cfg.trace_detail == phasegap::cli::TraceDetail::kThread) {
+      const int thread_payload = trace_window_iters * cfg.threads;
+      const std::size_t thread_gather_size =
+          static_cast<std::size_t>(world_size) * static_cast<std::size_t>(thread_payload);
+      if (rank == 0) {
+        trace_thread_interior_global.resize(thread_gather_size);
+        trace_thread_boundary_global.resize(thread_gather_size);
+      }
+      MPI_Gather(trace_thread_interior_local.data(), thread_payload, MPI_DOUBLE,
+                 trace_thread_interior_global.data(), thread_payload, MPI_DOUBLE, 0,
+                 MPI_COMM_WORLD);
+      MPI_Gather(trace_thread_boundary_local.data(), thread_payload, MPI_DOUBLE,
+                 trace_thread_boundary_global.data(), thread_payload, MPI_DOUBLE, 0,
+                 MPI_COMM_WORLD);
+    }
+  }
+
   if (rank == 0) {
     const double wait_frac = phasegap::stats::WaitFraction(t_wait_mean_avg, t_iter_mean_avg);
     const double wait_skew = phasegap::stats::WaitSkew(t_wait_mean_max, t_wait_mean_avg);
@@ -852,7 +1005,7 @@ int main(int argc, char** argv) {
       trace_summary.ranks = world_size;
       trace_summary.omp_threads = omp_threads;
       trace_summary.measured_iters = measured_iters;
-      trace_summary.trace_iters = cfg.trace_iters;
+      trace_summary.trace_iters = trace_window_iters;
       trace_summary.mpi_thread_provided = provided;
       trace_summary.t_post_us = t_post_mean_avg;
       trace_summary.t_interior_us = t_interior_mean_avg;
@@ -861,6 +1014,31 @@ int main(int argc, char** argv) {
       trace_summary.t_iter_us = t_iter_mean_avg;
       trace_summary.wait_frac = wait_frac;
       trace_summary.overlap_ratio = overlap_ratio_avg;
+      trace_summary.trace_window_start_iter = trace_window_start;
+      trace_summary.bytes_total = bw.bytes_total;
+      if (trace_window_iters > 0) {
+        trace_summary.rank_iterations.resize(
+            static_cast<std::size_t>(world_size * trace_window_iters));
+        for (int r = 0; r < world_size; ++r) {
+          for (int i = 0; i < trace_window_iters; ++i) {
+            const int idx = r * trace_window_iters + i;
+            phasegap::trace::TraceSummary::RankIteration row{};
+            row.t_post_us = trace_post_global[static_cast<std::size_t>(idx)];
+            row.t_interior_us = trace_interior_global[static_cast<std::size_t>(idx)];
+            row.t_wait_us = trace_wait_global[static_cast<std::size_t>(idx)];
+            row.t_boundary_us = trace_boundary_global[static_cast<std::size_t>(idx)];
+            row.t_iter_us = trace_iter_global[static_cast<std::size_t>(idx)];
+            row.wait_frac = trace_wait_frac_global[static_cast<std::size_t>(idx)];
+            row.mpi_test_calls = trace_mpi_test_calls_global[static_cast<std::size_t>(idx)];
+            row.bytes_total = trace_bytes_total_global[static_cast<std::size_t>(idx)];
+            trace_summary.rank_iterations[static_cast<std::size_t>(idx)] = row;
+          }
+        }
+        if (cfg.trace_detail == phasegap::cli::TraceDetail::kThread) {
+          trace_summary.thread_interior_us = std::move(trace_thread_interior_global);
+          trace_summary.thread_boundary_us = std::move(trace_thread_boundary_global);
+        }
+      }
       const bool trace_ok = phasegap::trace::WriteTrace(cfg, trace_summary, "trace");
       if (!trace_ok) {
         MPI_Finalize();
