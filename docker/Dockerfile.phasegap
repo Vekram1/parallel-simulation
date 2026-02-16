@@ -1,0 +1,23 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    build-essential \
+    ca-certificates \
+    cmake \
+    git \
+    iproute2 \
+    ninja-build \
+    openmpi-bin \
+    libopenmpi-dev \
+    openssh-client \
+    openssh-server \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+
+COPY docker/mpi_worker_entrypoint.sh /usr/local/bin/mpi_worker_entrypoint.sh
+RUN chmod +x /usr/local/bin/mpi_worker_entrypoint.sh

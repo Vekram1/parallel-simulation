@@ -27,6 +27,22 @@ OMP_NUM_THREADS=2 mpirun -np 2 ./build/phasegap \
   --manifest 1
 ```
 
+## Guided Launcher (TUI)
+
+For a more seamless operator workflow, use the interactive launcher:
+
+```bash
+scripts/phasegap_tui.sh
+```
+
+It provides menu-driven flows for:
+- smoke run
+- strict quality gate
+- matrix dry-run/quick-run
+- Docker netem smoke
+- Docker multi-container MPI + netem run
+- netem preset listing
+
 ## First Successful Run
 
 Run a small baseline that should generate all core artifacts:
@@ -222,6 +238,26 @@ Input constraints (fail-fast validation):
 - `--trace-iters`, `--n-local`, `--iters` must be positive integers
 - `--core-budget`, `--max-runs`, `--warmup`, `--bytes-per-point` must be non-negative integers
 
+## Report Pack (Recommended)
+
+Generate a standard interpretation pack (plots + confidence summary) from one or more run roots:
+
+```bash
+python3 scripts/analyze.py \
+  --input runs/matrix \
+  --out-dir runs/analysis-report
+```
+
+Outputs include:
+- `wait_frac_vs_threads.png`
+- `overlap_ratio_vs_threads.png`
+- `wait_skew_vs_threads.png`
+- `phase_stack_vs_threads.png`
+- `wait_p50_p95_vs_threads.png`
+- `nbtest_poll_tradeoff.png` (when `nb_test` rows exist)
+- `metric_summary.csv`
+- `confidence_summary.md`
+
 ## Linux Netem Workflow
 
 Linux-only impairment helpers are available for communication sensitivity studies:
@@ -270,6 +306,69 @@ Preview commands without changing the system:
 scripts/netem_on.sh --iface eth0 --preset wan_mild --dry-run
 scripts/netem_off.sh --iface eth0 --dry-run
 ```
+
+## Docker Simulated-Network Smoke
+
+For a turnkey simulated-network test path, use:
+
+```bash
+scripts/docker_netem_smoke.sh
+```
+
+What it does:
+- builds a Linux OpenMPI toolchain image (`docker/Dockerfile.phasegap`)
+- applies netem impairment inside the container namespace
+- runs smoke build + a traced `phase_nb` run with `--transport tcp`
+- always clears netem on exit (success or failure)
+
+Example with explicit impairment overrides:
+
+```bash
+scripts/docker_netem_smoke.sh \
+  --np 2 \
+  --threads 2 \
+  --delay-ms 25 \
+  --jitter-ms 6 \
+  --loss-pct 0.3 \
+  --rate 50mbit
+```
+
+## Docker Multi-Container MPI (Recommended for Link Realism)
+
+For a launcher + worker topology across separate containers, use:
+
+```bash
+scripts/docker_mpi_compose.sh
+```
+
+What it does:
+- starts `launcher`, `worker1`, `worker2` via `docker compose`
+- provisions SSH trust for OpenMPI remote launch
+- optionally applies netem shaping on worker `eth0`
+- runs `mpirun` across workers using a generated hostfile
+- clears netem and tears down compose stack automatically (unless `--keep-up`)
+
+Example:
+
+```bash
+scripts/docker_mpi_compose.sh \
+  --np 2 \
+  --threads 2 \
+  --delay-ms 25 \
+  --jitter-ms 6 \
+  --loss-pct 0.3 \
+  --rate 50mbit
+```
+
+Useful options:
+- `--no-netem` to run clean multi-container MPI without impairment
+- `--no-image-build` to reuse an existing image
+- `--keep-up` to keep containers running for inspection/debugging
+- `--dry-run` to preview all actions
+
+Operational notes:
+- first real run provisions SSH material under `.docker-mpi/` for launcher->worker MPI startup
+- `--dry-run` now prints plan only and does not mutate `.docker-mpi/`
 
 ## macOS OpenMP Configure Helper
 

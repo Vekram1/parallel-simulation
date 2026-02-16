@@ -1,0 +1,49 @@
+services:
+  launcher:
+    image: ${PHASEGAP_IMAGE:-phasegap-netem:latest}
+    container_name: phasegap-launcher
+    hostname: launcher
+    working_dir: /work
+    volumes:
+      - ../:/work
+      - ../.docker-mpi:/docker-mpi
+    depends_on:
+      - worker1
+      - worker2
+    command: ["bash", "-lc", "sleep infinity"]
+    networks:
+      - phasegapnet
+
+  worker1:
+    image: ${PHASEGAP_IMAGE:-phasegap-netem:latest}
+    container_name: phasegap-worker1
+    hostname: worker1
+    working_dir: /work
+    volumes:
+      - ../:/work
+      - ../.docker-mpi:/docker-mpi
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    command: ["/usr/local/bin/mpi_worker_entrypoint.sh"]
+    networks:
+      - phasegapnet
+
+  worker2:
+    image: ${PHASEGAP_IMAGE:-phasegap-netem:latest}
+    container_name: phasegap-worker2
+    hostname: worker2
+    working_dir: /work
+    volumes:
+      - ../:/work
+      - ../.docker-mpi:/docker-mpi
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    command: ["/usr/local/bin/mpi_worker_entrypoint.sh"]
+    networks:
+      - phasegapnet
+
+networks:
+  phasegapnet:
+    name: phasegapnet
