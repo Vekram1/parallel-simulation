@@ -56,3 +56,13 @@ What the smoke gate enforces:
 CI gate:
 - GitHub Actions workflow at `.github/workflows/build.yml` runs the same smoke script on Ubuntu with Open MPI.
 - CI also uploads `runs/ci-smoke/smoke.stdout.log` as an artifact for debugging failures.
+
+## macOS OpenMP Configure Helper
+
+If CMake cannot detect OpenMP on macOS, use:
+
+```bash
+scripts/dev/configure-macos-openmp.sh --build-dir build-appleomp --build
+```
+
+This helper configures with Apple Clang and Homebrew `libomp` flags, then optionally builds.
