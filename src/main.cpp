@@ -195,7 +195,6 @@ int main(int argc, char** argv) {
                    cfg.halo, MPI_DOUBLE, neighbors.right, 100, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
       MPI_Sendrecv(send_right.data(), cfg.halo, MPI_DOUBLE, neighbors.right, 101, recv_left.data(),
                    cfg.halo, MPI_DOUBLE, neighbors.left, 101, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-      ++mpi_wait_calls;
       timer.EndWait();
       timer.EndCommWindow();
 
