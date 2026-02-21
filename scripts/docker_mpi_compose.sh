@@ -13,7 +13,6 @@ LOSS_PCT="0.20"
 RATE=""
 NP=2
 THREADS=2
-SLOTS_PER_WORKER=2
 N_LOCAL=256
 HALO=8
 ITERS=8
@@ -26,19 +25,22 @@ NO_IMAGE_BUILD=0
 NO_NETEM=0
 KEEP_UP=0
 DRY_RUN=0
+MAX_WORKERS=10
 
 usage() {
   cat <<'USAGE'
 Usage: scripts/docker_mpi_compose.sh [options]
 
-Runs PhaseGap across multiple Docker containers (launcher + 2 workers)
+Runs PhaseGap across multiple Docker containers (launcher + worker1..worker10)
 using OpenMPI over SSH, with optional netem shaping on worker links.
+Worker selection rule: first N workers are used and hostfile is emitted
+with one slot per worker, enforcing N hosts = N ranks.
 
 Options:
   --image <tag>           Docker image tag (default: phasegap-netem:latest)
   --np <P>                MPI ranks (default: 2)
   --threads <T>           OMP threads per rank (default: 2)
-  --slots-per-worker <S>  Slots advertised per worker in hostfile (default: 2)
+  --slots-per-worker <S>  Deprecated (ignored; hostfile always uses slots=1)
   --n-local <N>           Local points per rank (default: 256)
   --halo <H>              Halo width (default: 8)
   --iters <K>             Iterations (default: 8)
@@ -124,7 +126,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --slots-per-worker)
       require_option_value "$1" "${2:-}"
-      SLOTS_PER_WORKER="$2"
+      echo "[docker-mpi] warn: --slots-per-worker is deprecated and ignored (using slots=1 per worker)" >&2
       shift 2
       ;;
     --n-local)
@@ -221,14 +223,19 @@ if (( ITERS <= WARMUP )); then
 fi
 require_pos_int "--np" "${NP}"
 require_pos_int "--threads" "${THREADS}"
-require_pos_int "--slots-per-worker" "${SLOTS_PER_WORKER}"
 require_pos_int "--n-local" "${N_LOCAL}"
 require_pos_int "--halo" "${HALO}"
 require_pos_int "--iters" "${ITERS}"
 require_pos_int "--warmup" "${WARMUP}"
-if (( NP > (2 * SLOTS_PER_WORKER) )); then
-  echo "[docker-mpi] warn: requested np=${NP} exceeds advertised slots=$((2 * SLOTS_PER_WORKER)); MPI may oversubscribe or fail"
+if (( NP > MAX_WORKERS )); then
+  echo "[docker-mpi] fail: np=${NP} exceeds supported worker count=${MAX_WORKERS}" >&2
+  exit 2
 fi
+
+ACTIVE_WORKERS=()
+for i in $(seq 1 "${NP}"); do
+  ACTIVE_WORKERS+=("worker${i}")
+done
 
 if (( DRY_RUN == 0 )); then
   require_cmd docker
@@ -252,7 +259,7 @@ fi
 
 if (( DRY_RUN == 1 )); then
   echo "[docker-mpi] dry-run: would ensure key/hostfile state under ${DOCKER_MPI_DIR}"
-  echo "[docker-mpi] dry-run: hostfile => worker1 slots=${SLOTS_PER_WORKER}, worker2 slots=${SLOTS_PER_WORKER}"
+  echo "[docker-mpi] dry-run: hostfile => ${ACTIVE_WORKERS[*]} (slots=1 each)"
 else
   mkdir -p "${DOCKER_MPI_DIR}"
   if [[ ! -f "${DOCKER_MPI_DIR}/id_ed25519" ]]; then
@@ -261,10 +268,10 @@ else
   run_cmd cp "${DOCKER_MPI_DIR}/id_ed25519.pub" "${DOCKER_MPI_DIR}/authorized_keys"
   run_cmd chmod 600 "${DOCKER_MPI_DIR}/id_ed25519" "${DOCKER_MPI_DIR}/authorized_keys"
 
-  cat > "${DOCKER_MPI_DIR}/hostfile" <<HOSTS
-worker1 slots=${SLOTS_PER_WORKER}
-worker2 slots=${SLOTS_PER_WORKER}
-HOSTS
+  : > "${DOCKER_MPI_DIR}/hostfile"
+  for w in "${ACTIVE_WORKERS[@]}"; do
+    echo "${w} slots=1" >> "${DOCKER_MPI_DIR}/hostfile"
+  done
 fi
 
 export PHASEGAP_IMAGE="${IMAGE_TAG}"
@@ -278,8 +285,9 @@ cleanup() {
     return
   fi
   if (( NO_NETEM == 0 )); then
-    ${COMPOSE_BIN} -f "${COMPOSE_FILE}" exec -T worker1 bash -lc "cd /work && scripts/netem_off.sh --iface ${IFACE} --quiet || true" >/dev/null 2>&1 || true
-    ${COMPOSE_BIN} -f "${COMPOSE_FILE}" exec -T worker2 bash -lc "cd /work && scripts/netem_off.sh --iface ${IFACE} --quiet || true" >/dev/null 2>&1 || true
+    for w in "${ACTIVE_WORKERS[@]}"; do
+      ${COMPOSE_BIN} -f "${COMPOSE_FILE}" exec -T "${w}" bash -lc "cd /work && scripts/netem_off.sh --iface ${IFACE} --quiet || true" >/dev/null 2>&1 || true
+    done
   fi
   if (( KEEP_UP == 0 )); then
     ${COMPOSE_BIN} -f "${COMPOSE_FILE}" down >/dev/null 2>&1 || true
@@ -287,9 +295,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-run_cmd ${COMPOSE_BIN} -f "${COMPOSE_FILE}" up -d worker1 worker2 launcher
+run_cmd ${COMPOSE_BIN} -f "${COMPOSE_FILE}" up -d "${ACTIVE_WORKERS[@]}" launcher
 
-SSH_WAIT="for h in worker1 worker2; do
+SSH_WAIT="for h in ${ACTIVE_WORKERS[*]}; do
   until ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /docker-mpi/id_ed25519 root@\"\${h}\" true >/dev/null 2>&1; do sleep 1; done
 done"
 run_cmd ${COMPOSE_BIN} -f "${COMPOSE_FILE}" exec -T launcher bash -lc "${SSH_WAIT}"
@@ -299,8 +307,9 @@ if (( NO_NETEM == 0 )); then
   if [[ -n "${RATE}" ]]; then
     NETEM_CMD+=" --rate ${RATE}"
   fi
-  run_cmd ${COMPOSE_BIN} -f "${COMPOSE_FILE}" exec -T worker1 bash -lc "cd /work && ${NETEM_CMD}"
-  run_cmd ${COMPOSE_BIN} -f "${COMPOSE_FILE}" exec -T worker2 bash -lc "cd /work && ${NETEM_CMD}"
+  for w in "${ACTIVE_WORKERS[@]}"; do
+    run_cmd ${COMPOSE_BIN} -f "${COMPOSE_FILE}" exec -T "${w}" bash -lc "cd /work && ${NETEM_CMD}"
+  done
 fi
 
 MPI_RUN_CMD="

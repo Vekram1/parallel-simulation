@@ -93,17 +93,7 @@ MPI is the standard way to write parallel programs where “parallelism” is no
   Number of owned elements near each edge whose updates depend on halo data after `S` steps. Used to define:
   - interior region (doesn’t need halo)
   - boundary band (needs halo)
-- Correctness invariant: `H >= B` (otherwise boundary updates would require neighbor data you didn’t communicate).
-- `alpha` / `work`: extra per-point arithmetic “burn” factor to scale compute intensity (if you keep that knob).
-
-## Run control
-- `K` / `iters`: number of measured iterations.
-- `W` / `warmup`: number of warmup iterations excluded from stats.
-- `mode`: orchestration schedule, e.g. `{phase_nb, phase_blk, nb_test, phase_persist, omp_tasks}`.
-- `poll_every`: for `nb_test`, how frequently you poll (`MPI_Test*`) during chunked interior compute (controls polling overhead vs responsiveness).
-
-## MPI / OpenMP configuration
-- `mpi_thread_requested`: requested MPI thread level: `{funneled, serialized, multiple}`.
+sneled, serialized, multiple}`.
 - `mpi_thread_provided`: actual thread level returned by `MPI_Init_thread`.
 - `omp_schedule`: OpenMP loop schedule `{static, dynamic, guided}`.
 - `omp_chunk`: chunk size for OpenMP scheduling (relevant mainly for dynamic/guided).

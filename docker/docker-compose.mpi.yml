@@ -1,3 +1,16 @@
+x-worker-common: &worker-common
+  image: ${PHASEGAP_IMAGE:-phasegap-netem:latest}
+  working_dir: /work
+  volumes:
+    - ../:/work
+    - ../.docker-mpi:/docker-mpi
+  cap_add:
+    - NET_ADMIN
+    - NET_RAW
+  command: ["/usr/local/bin/mpi_worker_entrypoint.sh"]
+  networks:
+    - phasegapnet
+
 services:
   launcher:
     image: ${PHASEGAP_IMAGE:-phasegap-netem:latest}
@@ -10,39 +23,67 @@ services:
     depends_on:
       - worker1
       - worker2
+      - worker3
+      - worker4
+      - worker5
+      - worker6
+      - worker7
+      - worker8
+      - worker9
+      - worker10
     command: ["bash", "-lc", "sleep infinity"]
     networks:
       - phasegapnet
 
   worker1:
-    image: ${PHASEGAP_IMAGE:-phasegap-netem:latest}
+    <<: *worker-common
     container_name: phasegap-worker1
     hostname: worker1
-    working_dir: /work
-    volumes:
-      - ../:/work
-      - ../.docker-mpi:/docker-mpi
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    command: ["/usr/local/bin/mpi_worker_entrypoint.sh"]
-    networks:
-      - phasegapnet
 
   worker2:
-    image: ${PHASEGAP_IMAGE:-phasegap-netem:latest}
+    <<: *worker-common
     container_name: phasegap-worker2
     hostname: worker2
-    working_dir: /work
-    volumes:
-      - ../:/work
-      - ../.docker-mpi:/docker-mpi
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    command: ["/usr/local/bin/mpi_worker_entrypoint.sh"]
-    networks:
-      - phasegapnet
+
+  worker3:
+    <<: *worker-common
+    container_name: phasegap-worker3
+    hostname: worker3
+
+  worker4:
+    <<: *worker-common
+    container_name: phasegap-worker4
+    hostname: worker4
+
+  worker5:
+    <<: *worker-common
+    container_name: phasegap-worker5
+    hostname: worker5
+
+  worker6:
+    <<: *worker-common
+    container_name: phasegap-worker6
+    hostname: worker6
+
+  worker7:
+    <<: *worker-common
+    container_name: phasegap-worker7
+    hostname: worker7
+
+  worker8:
+    <<: *worker-common
+    container_name: phasegap-worker8
+    hostname: worker8
+
+  worker9:
+    <<: *worker-common
+    container_name: phasegap-worker9
+    hostname: worker9
+
+  worker10:
+    <<: *worker-common
+    container_name: phasegap-worker10
+    hostname: worker10
 
 networks:
   phasegapnet:

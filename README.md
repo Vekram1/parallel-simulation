@@ -257,6 +257,7 @@ Outputs include:
 - `nbtest_poll_tradeoff.png` (when `nb_test` rows exist)
 - `metric_summary.csv`
 - `confidence_summary.md`
+- `dashboard.html` (single-file report view for quick sharing)
 
 ## Linux Netem Workflow
 

@@ -224,11 +224,11 @@ if [[ -z "${LOSS_PCT}" ]]; then
 fi
 
 if [[ -n "${RATE}" ]]; then
-  run_cmd tc qdisc replace dev "${IFACE}" root handle 1: tbf \
-    rate "${RATE}" burst "${BURST}" latency "${LATENCY_MS}ms"
-  run_cmd tc qdisc replace dev "${IFACE}" parent 1:1 handle 10: netem \
+  # Keep one root qdisc for compatibility across kernels/containers.
+  run_cmd tc qdisc replace dev "${IFACE}" root handle 1: netem \
     delay "${DELAY_MS}ms" "${JITTER_MS}ms" \
-    loss "${LOSS_PCT}%"
+    loss "${LOSS_PCT}%" \
+    rate "${RATE}"
 else
   run_cmd tc qdisc replace dev "${IFACE}" root handle 1: netem \
     delay "${DELAY_MS}ms" "${JITTER_MS}ms" \

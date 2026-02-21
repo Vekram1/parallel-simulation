@@ -141,9 +141,40 @@ menu() {
 5) Docker netem smoke (simulated network)
 6) Docker multi-container MPI + netem run
 7) Netem preset list
-8) PhaseGap custom CLI run (all options)
-9) Exit
+8) Show PhaseGap CLI options
+9) PhaseGap custom CLI run (all options)
+10) Exit
 MENU
+}
+
+show_phasegap_cli_options() {
+  cat <<'OPTS'
+------------------------------------------------
+PhaseGap CLI Options (from phasegap --help)
+------------------------------------------------
+Required:
+  --mode <phase_nb|phase_blk|nb_test|phase_persist|omp_tasks>
+  --ranks <P> --threads <T> --N <local_n> --halo <H> --iters <K> --warmup <W>
+
+Optional:
+  --kernel <stencil3|stencil5|axpy>
+  --radius <R> --timesteps <S> --poll_every <q>
+  --mpi_thread <funneled|serialized|multiple>
+  --progress <inline_poll|progress_thread>
+  --omp_schedule <static|dynamic|guided> --omp_chunk <c>
+  --omp_bind <0|1|false|true> --omp_places <cores|threads>
+  --flops_per_point <f> --bytes_per_point <b>
+  --check <0|1> --check_every <E> --poison_ghost <0|1>
+  --sync <none|barrier_start|barrier_each>
+  --trace <0|1> --trace_iters <M> --trace_detail <rank|thread>
+  --transport <auto|shm|tcp>
+  --out_dir <dir> --run_id <id> --csv <file> --csv_mode <write|append> --manifest <0|1>
+
+Notes:
+  - In custom mode, optional prompts can be left blank to skip.
+  - Pre-check enforced: halo >= radius * timesteps.
+------------------------------------------------
+OPTS
 }
 
 smoke_flow() {
@@ -279,6 +310,9 @@ custom_phasegap_flow() {
   local effective_kernel effective_radius effective_timesteps
   local -a cmd
 
+  echo
+  show_phasegap_cli_options
+
   phasegap_bin="$(prompt_value "PhaseGap binary path" "${ROOT_DIR}/build/phasegap" "1" "text")"
   if [[ ! -x "${phasegap_bin}" ]]; then
     echo "[tui] fail: binary is not executable: ${phasegap_bin}"
@@ -384,7 +418,7 @@ main() {
   show_header
   while true; do
     menu
-    read -r -p "Select action [1-9]: " choice || true
+    read -r -p "Select action [1-10]: " choice || true
     case "${choice:-}" in
       1) smoke_flow ;;
       2) quality_gate_flow ;;
@@ -393,8 +427,9 @@ main() {
       5) docker_netem_flow ;;
       6) docker_mpi_compose_flow ;;
       7) run_cmd "${ROOT_DIR}/scripts/netem_on.sh" --list-presets ;;
-      8) custom_phasegap_flow ;;
-      9)
+      8) show_phasegap_cli_options ;;
+      9) custom_phasegap_flow ;;
+      10)
         echo "[tui] bye"
         exit 0
         ;;
